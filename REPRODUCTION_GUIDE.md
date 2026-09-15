@@ -1,0 +1,1980 @@
+# PhotoDedup (중복 사진 정리 도구) — 프로젝트 재현 가이드
+
+이 문서 하나만 보고 새 Windows PC에서 프로젝트를 처음부터 끝까지 그대로 재현할 수 있도록,
+목적/구조/의존성/설정/실행 순서/전체 소스코드/검증 방법/트러블슈팅을 빠짐없이 기록합니다.
+아래 소스코드는 요약이 아니라 실제 완성본 파일의 전체 내용입니다.
+
+---
+
+## 1. 프로젝트 개요
+
+### 목적
+zip으로 압축된 사진 묶음에서 **내용이 동일하거나 사실상 같은 중복 사진**을 자동으로 찾아,
+각 중복 그룹에서 **압축파일 내 순서상 가장 먼저 등장한 사진 1장만** 남기고 **바탕화면(Desktop)에
+결과 폴더 하나만** 만들어주는 Windows 데스크톱 프로그램입니다. 파일명이 아니라 사진 "내용"으로
+판별하며, 결과 폴더에 모인 고유 사진들은 그리드 화면에서 사람이 직접 순서를 정리한 뒤 확정할 수
+있습니다.
+
+### 사용 기술 스택
+| 구분 | 사용 기술 | 비고 |
+|---|---|---|
+| 언어 | Python 3.11 | 개발/테스트에 사용한 정확한 버전: **3.11.15** |
+| GUI | tkinter (표준 라이브러리) + `tkinterdnd2` | 드래그앤드롭 지원을 위해 tkinterdnd2 사용 |
+| 이미지 처리 | `Pillow` | 이미지 열기/썸네일/EXIF 처리 |
+| 중복 판별 | `hashlib`(표준 라이브러리, SHA-256) + `imagehash`(pHash) | 정확 일치 + 유사 일치 이중 판별 |
+| 휴지통 이동 | `Send2Trash` | 원본 zip을 완전삭제 대신 복구 가능하게 삭제 |
+| 패키징 | `PyInstaller` (onefile) | 단일 실행파일(.exe) 생성 |
+| 설치 프로그램 | Inno Setup 6 (ISCC.exe) | Program Files 설치 + 시작메뉴/바탕화면 바로가기 + 제거 프로그램 + zip 우클릭 컨텍스트 메뉴 |
+| 외부 연동(선택) | FastStone Image Viewer | 설치돼 있으면 결과 폴더를 이 뷰어로 자동 오픈, 없으면 탐색기로 대체 |
+
+### 주요 기능 요약
+1. **입력**: zip 파일을 창에 드래그앤드롭하거나 "파일 선택" 버튼(기본 경로: `다운로드` 폴더)으로 추가. 여러 zip 동시 지원.
+2. **중복 판별** (2단계):
+   - 1단계: 파일 전체의 SHA-256 해시가 같으면 완전 동일한 사진으로 판정
+   - 2단계: `imagehash.phash`의 해밍거리가 임계값(기본 5, 슬라이더로 0~20 조절) 이하이면 유사 사진으로 판정 (재압축/화질변경 등 흡수)
+   - 옵션: 회전(90/180/270도)·좌우반전된 사진도 같은 사진으로 판정할지 체크박스로 선택 (기본 켜짐)
+   - 성능: BK-tree로 해밍거리 근사 최근접 탐색을 사용해 사진이 많아도 비교적 빠르게 처리
+3. **그룹핑**: Union-Find로 중복 그룹을 묶고, 그룹 내에서 zip 등장 순서가 가장 빠른 사진 1장만 최종 결과에 남김
+4. **출력**: 바탕화면에 `결과_유니크사진_YYYYMMDD_HHMMSS` 폴더 **하나만** 생성 (리포트 파일, zip 재압축 등 그 외 파일 생성 안 함). 처리 요약(전체/고유/제거/읽기실패 수)은 화면(UI)에만 표시.
+5. **제외된 중복 사진 미리보기**: 그룹별로 "유지"/"제외" 사진 썸네일을 대조해서 보여주는 팝업 (그랩 스크롤 지원)
+6. **사진 순서 정리 화면** ("결과 폴더 열기" 클릭 시 열림): 큰 화면(기본 최대화)에 사진을 그리드로 배치하고,
+   - 클릭/Shift+클릭으로 선택, 마우스 드래그 또는 "선택 위로/아래로" 버튼으로 순서 변경
+   - Delete 키로 사진 제외 표시(즉시 삭제 아님), Ctrl+Z로 실행 취소 (최대 50단계)
+   - 창 크기에 맞춰 한 줄에 보이는 사진 수(열 개수)가 자동으로 늘고 줆
+   - "최종 결과폴더로 보내기" 확정 시에만: 화면 순서대로 파일명에 순번(`001_`, `002_`…) 부여, 제외 표시한 사진 완전 삭제, **원본 zip을 휴지통으로 이동**, 결과 폴더를 **FastStone Image Viewer로 자동 오픈**(없으면 탐색기)
+7. **자동 실행**: 탐색기에서 zip 파일을 우클릭 → "중복 사진 정리 도구로 열기"를 선택하면 파일 목록 채우기 → 처리 시작 → 결과 폴더 열기(순서 정리 화면)까지 자동으로 진행됨. 다만 "최종 결과폴더로 보내기"만은 사람이 직접 눌러야 함(파일명 변경 + zip 삭제가 일어나는 단계라 의도적으로 자동화하지 않음).
+8. **예외 처리**: 이미지가 아닌 파일 무시, 손상된 이미지는 "읽기 실패" 목록으로 안내, 암호 걸린/손상된 zip은 오류 메시지로 안내.
+
+---
+
+## 2. 폴더/파일 구조
+
+```
+PhotoDedup/
+├── app/
+│   ├── __init__.py          # 빈 파일 (app을 패키지로 만들기 위함)
+│   ├── core.py               # 핵심 로직: 압축해제, sha256+pHash 이중 판별, 그룹핑, 바탕화면 결과폴더 생성
+│   ├── cli.py                 # 콘솔(CLI) 버전 진입점
+│   └── gui.py                  # GUI 버전 (tkinter + tkinterdnd2), 사진 순서 편집 창(OrderEditor) 포함
+├── main.py                     # 프로그램 진입점 (인자 없으면 GUI, zip 경로면 자동실행 GUI, 그 외 옵션은 CLI)
+├── requirements.txt             # Python 의존성 목록
+├── build.bat                     # PyInstaller exe 빌드 + (있으면) Inno Setup 설치 프로그램 빌드 스크립트
+├── installer.iss                  # Inno Setup 설치 프로그램 스크립트
+├── README.md                       # 사용 설명서
+├── PhotoDedup_사용설명서.png         # 한 장짜리 인포그래픽 사용 설명서 (별도 생성물)
+├── .gitignore                       # venv/build/dist/installer_output 등 제외
+├── 옵시디언_노트/                     # 개발 과정을 정리한 Obsidian 노트 모음 (별도 생성물, 프로그램 동작과 무관)
+├── venv/                             # (재현 시 새로 생성) Python 가상환경
+├── build/                            # (빌드 시 생성) PyInstaller 중간 산출물
+├── dist/
+│   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
+└── installer_output/
+    └── PhotoDedup_Setup_1.0.0.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+```
+
+### 핵심 파일 역할 한 줄 설명
+| 파일 | 역할 |
+|---|---|
+| `main.py` | 실행 진입점. 인자 형태를 보고 GUI/자동실행 GUI/CLI 중 무엇을 실행할지 결정 |
+| `app/__init__.py` | `app` 디렉터리를 파이썬 패키지로 인식시키는 빈 파일 |
+| `app/core.py` | zip 압축 해제, SHA-256+pHash 이중 판별, Union-Find/BK-tree 그룹핑, 바탕화면 결과 폴더 생성 등 GUI/CLI 공용 핵심 로직 |
+| `app/cli.py` | 콘솔에서 `python -m app.cli photos.zip` 형태로 실행하는 CLI. 개발 중 핵심 로직을 빠르게 검증하는 용도 |
+| `app/gui.py` | tkinter 기반 GUI 전체. `DedupApp`(메인 창), `OrderEditor`(사진 순서 정리 창), FastStone 탐지 함수 등 포함 |
+| `requirements.txt` | pip으로 설치할 의존성 목록 |
+| `build.bat` | venv 활성화 후 실행하면 exe와 설치 프로그램을 한 번에 빌드하는 배치 스크립트 |
+| `installer.iss` | Inno Setup 설치 프로그램 정의 (설치 경로, 바로가기, 레지스트리 컨텍스트 메뉴 등) |
+| `README.md` | 사용자용 사용 설명서 (실행법, 빌드법, 판별 로직 요약 등) |
+
+---
+
+## 3. 의존성 및 버전
+
+### 언어/런타임 버전 (개발 환경 기준, 그대로 맞추는 것을 권장)
+```
+$ python --version
+Python 3.11.15
+
+$ 시스템: Windows 10 Pro (10.0.19045.6466)
+```
+
+> Python 3.9~3.12에서도 대체로 동작하지만, exe 빌드 검증은 3.11 기준으로 했습니다.
+> 새 PC에 Python 3.11이 없다면 `winget install Python.Python.3.11` 등으로 설치하세요.
+
+### requirements.txt (전체 원문)
+```text
+Pillow>=10.0.0
+imagehash>=4.3.1
+tkinterdnd2>=0.3.0
+send2trash>=1.8.0
+pyinstaller>=6.0.0
+```
+
+### 실제 개발 환경에서 설치된 정확한 버전 (`pip freeze` 결과, 100% 동일 재현이 필요하면 이 버전으로 고정 설치)
+```text
+altgraph==0.17.5
+ImageHash==4.3.2
+numpy==2.4.6
+packaging==26.3
+pefile==2024.8.26
+pillow==12.3.0
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+PyWavelets==1.9.0
+pywin32-ctypes==0.2.3
+scipy==1.17.1
+Send2Trash==2.1.0
+tkinterdnd2==0.6.3
+```
+(`numpy`, `scipy`, `PyWavelets`, `packaging`, `pefile`, `altgraph`, `pyinstaller-hooks-contrib`, `pywin32-ctypes`는
+`imagehash`/`pyinstaller`가 내부적으로 요구하는 간접 의존성이며 직접 설치할 필요는 없습니다 - `requirements.txt`만
+설치하면 pip이 알아서 함께 설치합니다.)
+
+### 설치 프로그램(Setup.exe) 빌드에 필요한 외부 도구
+```
+Inno Setup 6 Command-Line Compiler
+Copyright (C) 1997-2026 Jordan Russell.
+https://www.innosetup.com
+```
+- 설치: `winget install JRSoftware.InnoSetup` (또는 https://jrsoftware.org/isinfo.php 에서 직접 다운로드)
+- 개발 시 사용한 경로: `C:\Users\<사용자명>\AppData\Local\Programs\Inno Setup 6\ISCC.exe`
+- exe 빌드 자체에는 필요 없고, "정식 설치 프로그램(Setup.exe)"까지 만들 때만 필요합니다.
+
+### 선택적 외부 프로그램 (없어도 전체 기능은 정상 동작, 없으면 자동으로 대체 동작함)
+- **FastStone Image Viewer** (버전 8.4.0.0으로 개발/테스트함): 결과 폴더 확정 후 자동으로 열어주는 뷰어. 설치돼 있지 않으면 코드가 자동으로 Windows 탐색기로 대체합니다. 필요하면 https://www.faststone.org/ 에서 무료로 설치할 수 있습니다.
+
+---
+
+## 4. 환경 설정
+
+이 프로젝트는 **외부 API나 데이터베이스에 연결하지 않는 순수 로컬 데스크톱 프로그램**이라
+`.env` 파일이나 API 키, 비밀값이 전혀 필요 없습니다. 코드 안의 설정값은 모두 아래 표가 전부이며,
+특정 계정에 종속된 하드코딩 경로는 없습니다(`.env.example` 대신, 실제로 코드 안에 있는 값 목록과
+위치를 그대로 정리했습니다).
+
+| 위치 | 현재 값 | 설명 | 다른 PC에서 필요한 조치 |
+|---|---|---|---|
+| `app/gui.py` → `_on_pick_files()` | `str(Path.home() / "Downloads")` | "파일 선택" 버튼을 눌렀을 때 기본으로 열리는 폴더 | 수정 불필요 - 실행하는 계정의 실제 다운로드 폴더를 자동으로 찾으며, 없으면 `Path.home()`(홈 폴더)로 대체됩니다. |
+| `app/gui.py` → `_FASTSTONE_COMMON_PATHS` | `C:\Program Files (x86)\FastStone Image Viewer\FSViewer.exe` 등 2개 경로 | FastStone Image Viewer 설치 경로 후보 | 코드가 이 경로들 + 레지스트리(App Paths)까지 자동으로 확인하므로 **보통 수정 불필요**. FastStone을 다른 경로에 설치했다면 이 리스트에 경로를 추가하세요. |
+| `installer.iss` → `AppId` | `{8F1E9C2E-7B3A-4C5D-9E1F-2A6B8C4D7E10}` | Inno Setup이 설치 프로그램을 식별하는 고유 GUID | 그대로 재현할 목적이면 **바꾸지 마세요**(바꾸면 "다른 프로그램"으로 인식되어 기존 설치본 위에 업데이트되지 않고 별도 설치됨). 완전히 새로운 별개 배포판을 만드는 경우에만 새 GUID로 교체하세요. |
+| `app/core.py` → `get_desktop_path()` | (하드코딩 값 없음, 레지스트리로 자동 탐지) | 바탕화면 실제 경로(OneDrive 리다이렉트 포함)를 `HKCU\...\Shell Folders`에서 읽어옴 | 수정 불필요 - 어떤 PC/계정에서도 자동으로 맞는 경로를 찾습니다. |
+
+**환경변수는 사용하지 않습니다.** 별도의 `config.yaml`, `settings.json` 같은 설정 파일도 없습니다 -
+위 표의 값들이 이 프로젝트의 "설정"에 해당하는 전부이며, 전부 소스코드(`app/gui.py`, `installer.iss`) 안에
+상수로 들어 있습니다.
+
+---
+
+## 5. 설치 및 실행 순서
+
+새 Windows PC에서 아래 순서를 그대로 따라 하면 됩니다. (PowerShell 또는 Git Bash 어느 쪽이든 가능;
+아래는 PowerShell 기준입니다.)
+
+```powershell
+# 0) 사전 준비: Python 3.11 설치 확인
+python --version
+# Python 3.11.x 가 아니면: winget install Python.Python.3.11
+
+# 1) 프로젝트 폴더 준비
+#    (git 저장소로 관리 중이라면 git clone, 아니라면 PhotoDedup 폴더를 그대로 복사)
+cd "C:\원하는 경로"
+# git clone <레포주소> PhotoDedup   # git으로 관리하는 경우
+cd PhotoDedup
+
+# 2) 가상환경 생성 및 활성화
+python -m venv venv
+venv\Scripts\activate
+
+# 3) 의존성 설치
+pip install -r requirements.txt
+
+# 4) (선택) 핵심 로직 빠르게 검증 - CLI로 테스트 zip 처리
+#    검증 방법은 8번 섹션 참고. 테스트 zip이 있다면:
+python main.py photos.zip
+
+# 5) GUI 실행 (개발/테스트용 - 콘솔 창이 함께 뜸)
+python main.py
+
+# 6) 배포용 실행파일(exe) 빌드
+pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
+    --collect-all tkinterdnd2 ^
+    --collect-all imagehash ^
+    main.py
+#    결과: dist\PhotoDedup.exe (약 60MB, 콘솔 창 없이 GUI만 뜸)
+
+# 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
+winget install JRSoftware.InnoSetup
+"%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
+#    결과: installer_output\PhotoDedup_Setup_1.0.0.exe
+
+# 6~7번은 build.bat 하나로 한 번에 실행 가능:
+build.bat
+```
+
+실행 방식별 정리:
+- **개발 중 GUI 확인**: `python main.py` (인자 없음)
+- **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.0.0.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
+
+---
+
+## 6. 핵심 소스코드 전체
+
+아래는 최종 완성본 기준, 각 파일의 **전체 원문**입니다.
+
+### `main.py`
+```python
+"""
+중복 사진 정리 도구 - 진입점
+
+- 인자 없이 실행: GUI 실행 (exe 더블클릭 시 기본 동작)
+- zip 파일 경로를 인자로 실행: GUI를 "자동 실행" 모드로 띄움
+  (탐색기에서 zip을 우클릭 → "중복 사진 정리 도구로 열기"를 선택했을 때, 또는 zip을
+   exe/바로가기 위로 드래그했을 때 Windows가 이 방식으로 프로그램을 실행한다)
+  → 파일 목록에 그 zip이 자동으로 채워지고, "처리 시작"과 "결과 폴더 열기"까지 자동으로 진행된다.
+  (최종 "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 한다 - 순서 확인 없이 파일명이
+  바뀌거나 원본 zip이 휴지통으로 가는 일을 막기 위함)
+- "-"로 시작하는 옵션과 함께 실행: 콘솔(CLI) 모드 (예: main.exe photos.zip --threshold 8)
+"""
+import sys
+
+
+def main():
+    args = sys.argv[1:]
+
+    if args and not args[0].startswith("-"):
+        zip_paths = [a for a in args if a.lower().endswith(".zip")]
+        if zip_paths:
+            from app.gui import main as gui_main
+            gui_main(auto_zip_paths=zip_paths)
+            return
+
+    if args:
+        from app.cli import main as cli_main
+        sys.exit(cli_main(args))
+    else:
+        from app.gui import main as gui_main
+        gui_main()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### `app/__init__.py`
+```python
+```
+(빈 파일입니다 - `app` 폴더를 파이썬 패키지로 인식시키는 용도 외 내용 없음)
+
+### `app/core.py`
+```python
+"""
+중복 사진 탐지 핵심 로직
+- zip 압축 해제(순서 보존)
+- sha256(완전 동일) + phash(내용 유사) 이중 판별
+- 중복 그룹화 및 바탕화면 결과 폴더 생성
+
+CLI(cli.py)와 GUI(gui.py)가 공용으로 이 모듈을 사용한다.
+결과는 항상 바탕화면(Desktop)에 `결과_유니크사진_YYYYMMDD_HHMMSS` 폴더 하나만 생성하며,
+리포트 파일이나 zip 재압축 등 그 외의 파일은 생성하지 않는다. 처리 요약은 호출자가
+반환된 ProcessResult를 이용해 화면(UI)에 직접 표시한다.
+"""
+from __future__ import annotations
+
+import hashlib
+import io
+import os
+import shutil
+import sys
+import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+from PIL import Image, ImageOps
+import imagehash
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+
+ProgressCallback = Optional[Callable[..., None]]
+
+
+# --------------------------------------------------------------------------
+# 데이터 구조
+# --------------------------------------------------------------------------
+
+@dataclass(eq=False)
+class PhotoItem:
+    """eq=False: 기본 객체 동일성(identity) 비교/해시를 사용한다.
+
+    GUI의 순서 편집 화면에서 선택된 사진들을 set()에 담아 다루므로 해시 가능해야 하고,
+    같은 사진의 서로 다른 인스턴스를 값 비교로 같다고 취급할 이유가 없다(항상 동일 객체를 참조해 다룬다).
+    """
+
+    order_index: int
+    source_zip: str
+    archive_name: str
+    extracted_path: str
+    display_name: str
+    size: int = 0
+    sha256: Optional[str] = None
+    phash: Optional["imagehash.ImageHash"] = None
+    phash_variants: dict = field(default_factory=dict)
+    read_error: Optional[str] = None
+    output_name: Optional[str] = None
+
+
+@dataclass
+class DupGroup:
+    kept: PhotoItem
+    excluded: list
+
+
+@dataclass
+class ProcessResult:
+    all_items: list
+    ok_items: list
+    failed_items: list
+    groups: list
+    unique_count: int
+    removed_count: int
+    output_dir: str
+    extract_errors: list
+
+
+# --------------------------------------------------------------------------
+# 바탕화면 경로 확인
+# --------------------------------------------------------------------------
+
+def get_desktop_path() -> Path:
+    """OneDrive 등으로 리다이렉트된 경우까지 고려해 실제 바탕화면 경로를 구한다."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+            )
+            value, _ = winreg.QueryValueEx(key, "Desktop")
+            path = Path(os.path.expandvars(value))
+            if path.is_dir():
+                return path
+        except Exception:
+            pass
+    fallback = Path.home() / "Desktop"
+    return fallback
+
+
+# --------------------------------------------------------------------------
+# 1단계: zip 압축 해제 (원본 순서 보존)
+# --------------------------------------------------------------------------
+
+def extract_zips(zip_paths, extract_root: Path, progress_cb: ProgressCallback = None):
+    """zip 목록에서 사진 파일만 원본 순서 그대로 추출한다.
+
+    반환값: (items: list[PhotoItem], errors: list[str])
+    """
+    items: list[PhotoItem] = []
+    errors: list[str] = []
+    idx = 0
+
+    for zi, zip_path in enumerate(zip_paths):
+        zip_path = Path(zip_path)
+        try:
+            zf = zipfile.ZipFile(zip_path)
+        except zipfile.BadZipFile as e:
+            errors.append(f"[{zip_path.name}] 압축파일을 열 수 없습니다(손상됨): {e}")
+            continue
+        except FileNotFoundError:
+            errors.append(f"[{zip_path.name}] 파일을 찾을 수 없습니다.")
+            continue
+
+        try:
+            out_dir = extract_root / f"zip{zi}_{zip_path.stem}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                name = info.filename
+                ext = Path(name).suffix.lower()
+                if ext not in IMAGE_EXTENSIONS:
+                    continue
+                try:
+                    data = zf.read(info)
+                except RuntimeError as e:
+                    # 암호 걸린 zip 항목 등
+                    errors.append(f"[{zip_path.name}] '{name}' 압축 해제 실패(암호 걸림 가능): {e}")
+                    continue
+                except Exception as e:
+                    errors.append(f"[{zip_path.name}] '{name}' 압축 해제 실패: {e}")
+                    continue
+
+                safe_name = f"{idx:06d}_{Path(name).name}"
+                dest_path = out_dir / safe_name
+                dest_path.write_bytes(data)
+
+                items.append(PhotoItem(
+                    order_index=idx,
+                    source_zip=zip_path.name,
+                    archive_name=name,
+                    extracted_path=str(dest_path),
+                    display_name=Path(name).name,
+                    size=len(data),
+                ))
+                idx += 1
+                if progress_cb:
+                    progress_cb("extract", idx)
+        finally:
+            zf.close()
+
+    return items, errors
+
+
+# --------------------------------------------------------------------------
+# 2단계: 해시 계산 (sha256 + phash [+ 회전/반전 변형])
+# --------------------------------------------------------------------------
+
+def compute_hashes(items: list, include_variants: bool = False, progress_cb: ProgressCallback = None):
+    total = len(items)
+    for i, item in enumerate(items):
+        try:
+            with open(item.extracted_path, "rb") as f:
+                data = f.read()
+            item.sha256 = hashlib.sha256(data).hexdigest()
+
+            with Image.open(io.BytesIO(data)) as img:
+                img.load()
+                img = ImageOps.exif_transpose(img)  # EXIF 회전 정보 정규화
+                img_rgb = img.convert("RGB")
+                item.phash = imagehash.phash(img_rgb)
+                if include_variants:
+                    item.phash_variants["rot90"] = imagehash.phash(img_rgb.rotate(90, expand=True))
+                    item.phash_variants["rot180"] = imagehash.phash(img_rgb.rotate(180, expand=True))
+                    item.phash_variants["rot270"] = imagehash.phash(img_rgb.rotate(270, expand=True))
+                    item.phash_variants["flip"] = imagehash.phash(ImageOps.mirror(img_rgb))
+        except Exception as e:
+            item.read_error = f"{type(e).__name__}: {e}"
+
+        if progress_cb:
+            progress_cb("hash", i + 1, total)
+
+    return items
+
+
+# --------------------------------------------------------------------------
+# 3단계: 중복 그룹화 (Union-Find + BK-tree 기반 pHash 근접 탐색)
+# --------------------------------------------------------------------------
+
+class UnionFind:
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+
+    def find(self, x: int) -> int:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a: int, b: int):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[rb] = ra
+
+
+class BKTree:
+    """해밍 거리 기반 근사 최근접 탐색 트리 (pHash 비교 O(n log n) 근사)."""
+
+    def __init__(self):
+        self.root = None  # (key, {distance: node})
+        self.items_by_key: dict[str, list[int]] = {}
+
+    @staticmethod
+    def _key_str(h) -> str:
+        return str(h)
+
+    def add(self, hash_key, index: int):
+        ks = self._key_str(hash_key)
+        self.items_by_key.setdefault(ks, []).append(index)
+
+        if self.root is None:
+            self.root = (hash_key, {})
+            return
+
+        node = self.root
+        while True:
+            node_key, children = node
+            d = hash_key - node_key
+            if d == 0:
+                return
+            if d in children:
+                node = children[d]
+            else:
+                children[d] = (hash_key, {})
+                return
+
+    def query(self, hash_key, threshold: int) -> list[int]:
+        if self.root is None:
+            return []
+        result: list[int] = []
+        stack = [self.root]
+        while stack:
+            node_key, children = stack.pop()
+            d = hash_key - node_key
+            if d <= threshold:
+                result.extend(self.items_by_key[self._key_str(node_key)])
+            lo, hi = d - threshold, d + threshold
+            for cd, child in children.items():
+                if lo <= cd <= hi:
+                    stack.append(child)
+        return result
+
+
+def cluster_photos(ok_items: list, threshold: int, allow_rotate_flip: bool) -> UnionFind:
+    n = len(ok_items)
+    uf = UnionFind(n)
+
+    base_tree = BKTree()
+    for i in range(n):
+        matches = base_tree.query(ok_items[i].phash, threshold)
+        for j in matches:
+            uf.union(i, j)
+        base_tree.add(ok_items[i].phash, i)
+
+    if allow_rotate_flip:
+        for variant_name in ("rot90", "rot180", "rot270", "flip"):
+            for i in range(n):
+                vh = ok_items[i].phash_variants.get(variant_name)
+                if vh is None:
+                    continue
+                for j in base_tree.query(vh, threshold):
+                    if j != i:
+                        uf.union(i, j)
+
+    return uf
+
+
+def build_groups(ok_items: list, uf: UnionFind) -> list:
+    clusters: dict[int, list[int]] = {}
+    for i in range(len(ok_items)):
+        root = uf.find(i)
+        clusters.setdefault(root, []).append(i)
+
+    groups = []
+    for idxs in clusters.values():
+        idxs.sort(key=lambda i: ok_items[i].order_index)
+        kept = ok_items[idxs[0]]
+        excluded = [ok_items[i] for i in idxs[1:]]
+        groups.append(DupGroup(kept=kept, excluded=excluded))
+
+    groups.sort(key=lambda g: g.kept.order_index)
+    return groups
+
+
+# --------------------------------------------------------------------------
+# 4단계: 바탕화면에 결과 폴더 생성
+# --------------------------------------------------------------------------
+
+def write_output(groups: list, output_dir: Path) -> Path:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    used_names: dict[str, int] = {}
+    kept_items = sorted([g.kept for g in groups], key=lambda it: it.order_index)
+
+    for item in kept_items:
+        name = item.display_name
+        if name in used_names:
+            used_names[name] += 1
+            stem, ext = Path(name).stem, Path(name).suffix
+            name = f"{stem}_{used_names[name]}{ext}"
+        else:
+            used_names[name] = 0
+        shutil.copy2(item.extracted_path, output_dir / name)
+        item.output_name = name
+
+    return output_dir
+
+
+# --------------------------------------------------------------------------
+# 전체 파이프라인
+# --------------------------------------------------------------------------
+
+def process_zips(
+    zip_paths: list,
+    work_dir: Path,
+    phash_threshold: int = 5,
+    allow_rotate_flip: bool = False,
+    progress_cb: ProgressCallback = None,
+) -> ProcessResult:
+    work_dir = Path(work_dir)
+    extract_dir = work_dir / "extracted"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress_cb:
+        progress_cb("stage", "압축 해제 중...")
+    all_items, extract_errors = extract_zips(zip_paths, extract_dir, progress_cb)
+
+    if progress_cb:
+        progress_cb("stage", "이미지 해시 계산 중...")
+    compute_hashes(all_items, include_variants=allow_rotate_flip, progress_cb=progress_cb)
+
+    ok_items = [it for it in all_items if it.read_error is None]
+    failed_items = [it for it in all_items if it.read_error is not None]
+
+    if progress_cb:
+        progress_cb("stage", "중복 그룹 분석 중...")
+    uf = cluster_photos(ok_items, phash_threshold, allow_rotate_flip)
+    groups = build_groups(ok_items, uf)
+
+    # 결과로 남길 사진이 하나도 없으면(zip이 아닌 파일을 잘못 넣은 경우 등) 바탕화면에
+    # 아무것도 만들지 않는다 - 빈 폴더조차 생성하지 않음.
+    output_dir_str = ""
+    if groups:
+        if progress_cb:
+            progress_cb("stage", "바탕화면에 결과 폴더 생성 중...")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = get_desktop_path() / f"결과_유니크사진_{timestamp}"
+        write_output(groups, output_dir)
+        output_dir_str = str(output_dir)
+    else:
+        if progress_cb:
+            progress_cb("stage", "처리 가능한 사진이 없어 결과 폴더를 생성하지 않았습니다.")
+
+    removed_count = sum(len(g.excluded) for g in groups)
+
+    if progress_cb:
+        progress_cb("stage", "완료")
+
+    return ProcessResult(
+        all_items=all_items,
+        ok_items=ok_items,
+        failed_items=failed_items,
+        groups=groups,
+        unique_count=len(groups),
+        removed_count=removed_count,
+        output_dir=output_dir_str,
+        extract_errors=extract_errors,
+    )
+```
+
+### `app/cli.py`
+```python
+"""
+중복 사진 탐지 - 콘솔(CLI) 버전
+
+처리 결과는 항상 바탕화면(Desktop)에 `결과_유니크사진_YYYYMMDD_HHMMSS` 폴더 하나로만
+저장되며, 그 외의 리포트 파일이나 zip은 생성하지 않는다. 요약은 콘솔 화면에만 출력한다.
+
+사용 예:
+    python -m app.cli photos.zip
+    python -m app.cli a.zip b.zip --threshold 8 --rotate-flip
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import tempfile
+from pathlib import Path
+
+from . import core
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="zip 안의 중복 사진을 찾아 바탕화면에 고유 사진 폴더를 만듭니다.")
+    parser.add_argument("zips", nargs="+", help="처리할 zip 파일 경로 (여러 개 가능)")
+    parser.add_argument("--threshold", type=int, default=5, help="pHash 해밍거리 임계값 (기본 5, 낮을수록 엄격)")
+    parser.add_argument("--rotate-flip", action="store_true", help="회전/좌우반전된 사진도 같은 사진으로 판정")
+    args = parser.parse_args(argv)
+
+    for z in args.zips:
+        if not Path(z).exists():
+            print(f"[오류] 파일을 찾을 수 없습니다: {z}", file=sys.stderr)
+            return 1
+
+    def progress(kind, *rest):
+        if kind == "stage":
+            print(f">> {rest[0]}")
+        elif kind == "hash":
+            done, total = rest
+            if total and (done % 50 == 0 or done == total):
+                print(f"   해시 계산 {done}/{total}")
+        elif kind == "extract":
+            if rest[0] % 100 == 0:
+                print(f"   추출 {rest[0]}개...")
+
+    with tempfile.TemporaryDirectory(prefix="photodedup_") as tmp:
+        result = core.process_zips(
+            zip_paths=args.zips,
+            work_dir=Path(tmp),
+            phash_threshold=args.threshold,
+            allow_rotate_flip=args.rotate_flip,
+            progress_cb=progress,
+        )
+
+    print()
+    print(f"전체 사진 수     : {len(result.all_items)}")
+    print(f"고유 사진 수     : {result.unique_count}")
+    print(f"제거된 중복 수   : {result.removed_count}")
+    print(f"읽기 실패 수     : {len(result.failed_items)}")
+    if result.failed_items:
+        print("읽기 실패 목록:")
+        for it in result.failed_items:
+            print(f"   - {it.display_name} ({it.source_zip}/{it.archive_name}): {it.read_error}")
+    if result.extract_errors:
+        print("압축 해제 오류:")
+        for e in result.extract_errors:
+            print(f"   - {e}")
+    print()
+    if result.output_dir:
+        print(f"결과 폴더(바탕화면): {result.output_dir}")
+    else:
+        print("처리 가능한 사진이 없어 결과 폴더를 생성하지 않았습니다.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+### `app/gui.py`
+```python
+"""
+중복 사진 탐지 - GUI (tkinter + tkinterdnd2)
+"""
+from __future__ import annotations
+
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import tkinter as tk
+import uuid
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _HAS_DND = True
+except Exception:
+    _HAS_DND = False
+
+from PIL import Image, ImageTk
+from send2trash import send2trash
+
+from . import core
+
+APP_TITLE = "중복 사진 정리 도구"
+THUMB_SIZE = (110, 110)
+
+# FastStone Image Viewer를 찾을 때 시도해보는 흔한 설치 경로 (없으면 레지스트리 App Paths도 확인한다)
+_FASTSTONE_COMMON_PATHS = [
+    r"C:\Program Files (x86)\FastStone Image Viewer\FSViewer.exe",
+    r"C:\Program Files\FastStone Image Viewer\FSViewer.exe",
+]
+
+
+def find_faststone_exe() -> str | None:
+    """설치된 FastStone Image Viewer 실행파일 경로를 찾는다. 못 찾으면 None."""
+    for p in _FASTSTONE_COMMON_PATHS:
+        if os.path.isfile(p):
+            return p
+
+    if sys.platform == "win32":
+        try:
+            import winreg
+            for hive, subkey in (
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\FSViewer.exe"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\FSViewer.exe"),
+            ):
+                try:
+                    key = winreg.OpenKey(hive, subkey)
+                    path, _ = winreg.QueryValueEx(key, "")
+                    if path and os.path.isfile(path):
+                        return path
+                except FileNotFoundError:
+                    continue
+        except Exception:
+            pass
+
+    return None
+
+_ORDER_PREFIX_RE = re.compile(r"^\d{2,}_(.+)$")
+
+
+def _strip_order_prefix(name: str) -> str:
+    """이미 순번이 붙어있는 파일명(예: 001_photo.jpg)이면 순번을 떼고 원래 이름만 돌려준다.
+
+    순서 편집을 다시 실행해도 001_002_photo.jpg 처럼 순번이 계속 누적되지 않게 하기 위함.
+    """
+    m = _ORDER_PREFIX_RE.match(name)
+    return m.group(1) if m else name
+
+
+class DedupApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(APP_TITLE)
+        self.root.geometry("760x640")
+        self.root.minsize(680, 560)
+
+        self.zip_paths: list[str] = []
+        self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
+        self.work_dir: str | None = None
+        self.result: core.ProcessResult | None = None
+        self.progress_queue: "queue.Queue" = queue.Queue()
+        self.worker_thread: threading.Thread | None = None
+        self.thumb_cache: list = []  # PhotoImage 참조 유지용
+        self._auto_open_order_editor = False  # 자동 실행 모드에서 처리 끝나면 순서 정리 창까지 자동으로 열지 여부
+
+        self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    # ------------------------------------------------------------------
+    # UI 구성
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        pad = {"padx": 10, "pady": 6}
+
+        # 드롭 영역
+        self.drop_frame = tk.LabelFrame(self.root, text="1. zip 파일 추가", padx=8, pady=8)
+        self.drop_frame.pack(fill="x", **pad)
+
+        drop_text = "여기로 zip 파일을 드래그 앤 드롭하세요"
+        if not _HAS_DND:
+            drop_text += "\n(드래그앤드롭 라이브러리 없음 - 아래 버튼으로 파일을 선택하세요)"
+        self.drop_label = tk.Label(
+            self.drop_frame, text=drop_text, height=4,
+            relief="ridge", bd=2, bg="#f5f5f5", fg="#555555", justify="center",
+        )
+        self.drop_label.pack(fill="x", expand=True)
+
+        if _HAS_DND:
+            self.drop_label.drop_target_register(DND_FILES)
+            self.drop_label.dnd_bind("<<Drop>>", self._on_drop)
+
+        btn_row = tk.Frame(self.drop_frame)
+        btn_row.pack(fill="x", pady=(6, 0))
+        tk.Button(btn_row, text="파일 선택...", command=self._on_pick_files).pack(side="left")
+        tk.Button(btn_row, text="목록 지우기", command=self._on_clear_files).pack(side="left", padx=6)
+
+        self.file_listbox = tk.Listbox(self.drop_frame, height=4)
+        self.file_listbox.pack(fill="x", pady=(6, 0))
+
+        # 옵션
+        opt_frame = tk.LabelFrame(self.root, text="2. 옵션", padx=8, pady=8)
+        opt_frame.pack(fill="x", **pad)
+
+        thresh_row = tk.Frame(opt_frame)
+        thresh_row.pack(fill="x")
+        tk.Label(thresh_row, text="유사 판정 민감도 (pHash 임계값):").pack(side="left")
+        self.threshold_var = tk.IntVar(value=5)
+        self.threshold_label = tk.Label(thresh_row, text="5  (엄격)", width=14)
+        self.threshold_label.pack(side="right")
+        self.threshold_scale = tk.Scale(
+            opt_frame, from_=0, to=20, orient="horizontal",
+            variable=self.threshold_var, showvalue=False, command=self._on_threshold_change,
+        )
+        self.threshold_scale.pack(fill="x")
+        tk.Label(
+            opt_frame, text="0(완전히 같은 사진만) ~ 20(약간만 비슷해도 중복 처리, 느슨)",
+            fg="#777777",
+        ).pack(anchor="w")
+
+        self.rotate_flip_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            opt_frame, text="회전 / 좌우반전된 사진도 같은 사진으로 판정",
+            variable=self.rotate_flip_var,
+        ).pack(anchor="w", pady=(4, 0))
+
+        # 실행
+        run_frame = tk.Frame(self.root)
+        run_frame.pack(fill="x", **pad)
+        self.start_btn = tk.Button(
+            run_frame, text="처리 시작", command=self._on_start, bg="#2f7dd1", fg="white",
+            font=("", 11, "bold"), height=1,
+        )
+        self.start_btn.pack(side="left")
+
+        self.status_label = tk.Label(run_frame, text="대기 중", anchor="w")
+        self.status_label.pack(side="left", padx=10, fill="x", expand=True)
+
+        self.progress = ttk.Progressbar(self.root, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", padx=10, pady=(0, 6))
+
+        # 결과
+        self.result_frame = tk.LabelFrame(self.root, text="3. 결과", padx=8, pady=8)
+        self.result_frame.pack(fill="both", expand=True, **pad)
+
+        self.summary_label = tk.Label(self.result_frame, text="아직 처리하지 않았습니다.", justify="left", anchor="w")
+        self.summary_label.pack(fill="x")
+
+        result_btn_row = tk.Frame(self.result_frame)
+        result_btn_row.pack(fill="x", pady=(8, 0))
+        self.open_folder_btn = tk.Button(result_btn_row, text="결과 폴더 열기", command=self._on_edit_order, state="disabled")
+        self.open_folder_btn.pack(side="left")
+        self.preview_btn = tk.Button(result_btn_row, text="제외된 중복 사진 미리보기", command=self._on_preview, state="disabled")
+        self.preview_btn.pack(side="left", padx=6)
+
+        self.log_text = tk.Text(self.result_frame, height=8, state="disabled", wrap="word")
+        self.log_text.pack(fill="both", expand=True, pady=(8, 0))
+
+    # ------------------------------------------------------------------
+    # 파일 입력
+    # ------------------------------------------------------------------
+    def _on_drop(self, event):
+        paths = self.root.tk.splitlist(event.data)
+        added = [p for p in paths if p.lower().endswith(".zip")]
+        skipped = len(paths) - len(added)
+        self._add_zip_paths(added)
+        if skipped:
+            messagebox.showwarning(APP_TITLE, f"zip 파일이 아닌 {skipped}개 항목은 제외되었습니다.")
+
+    def _on_pick_files(self):
+        initial_dir = str(Path.home() / "Downloads")
+        if not os.path.isdir(initial_dir):
+            initial_dir = str(Path.home())
+        paths = filedialog.askopenfilenames(
+            title="zip 파일 선택", initialdir=initial_dir, filetypes=[("ZIP 파일", "*.zip")],
+        )
+        self._add_zip_paths(paths)
+
+    def _add_zip_paths(self, paths):
+        for p in paths:
+            if p not in self.zip_paths:
+                self.zip_paths.append(p)
+                self.file_listbox.insert("end", p)
+
+    def _on_clear_files(self):
+        self.zip_paths.clear()
+        self.file_listbox.delete(0, "end")
+
+    def _on_threshold_change(self, _value=None):
+        v = self.threshold_var.get()
+        label = "엄격" if v <= 5 else ("보통" if v <= 12 else "느슨")
+        self.threshold_label.config(text=f"{v}  ({label})")
+
+    # ------------------------------------------------------------------
+    # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그)
+    # ------------------------------------------------------------------
+    def run_auto(self, zip_paths: list):
+        """전달받은 zip으로 파일 선택 → 처리 시작 → 결과 폴더 열기까지 자동으로 진행한다.
+
+        "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 하며, 그 전에 사람이 직접
+        검수/수정할 수 있도록 순서 정리 창을 열어둔 상태로 자동 진행을 멈춘다.
+        """
+        valid = [p for p in zip_paths if os.path.isfile(p)]
+        missing = [p for p in zip_paths if p not in valid]
+        if missing:
+            messagebox.showwarning(APP_TITLE, "다음 zip 파일을 찾을 수 없습니다:\n" + "\n".join(missing))
+        if not valid:
+            return
+        self._add_zip_paths(valid)
+        self._auto_open_order_editor = True
+        self._on_start()
+
+    # ------------------------------------------------------------------
+    # 처리 실행
+    # ------------------------------------------------------------------
+    def _on_start(self):
+        if not self.zip_paths:
+            messagebox.showwarning(APP_TITLE, "먼저 zip 파일을 추가해주세요.")
+            return
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+
+        self.start_btn.config(state="disabled")
+        self.open_folder_btn.config(state="disabled")
+        self.preview_btn.config(state="disabled")
+        self.progress.config(mode="indeterminate")
+        self.progress.start(10)
+        self._log_clear()
+        self.summary_label.config(text="처리 중입니다...")
+
+        self.work_dir = tempfile.mkdtemp(prefix="photodedup_")
+        zip_paths = list(self.zip_paths)
+        self.last_zip_paths = zip_paths  # 이번 처리에 실제로 쓰인 zip 목록을 기억해둔다(나중에 순서 정리 확정 시 삭제 대상)
+        threshold = self.threshold_var.get()
+        rotate_flip = self.rotate_flip_var.get()
+
+        def worker():
+            try:
+                result = core.process_zips(
+                    zip_paths=zip_paths,
+                    work_dir=Path(self.work_dir),
+                    phash_threshold=threshold,
+                    allow_rotate_flip=rotate_flip,
+                    progress_cb=lambda *a: self.progress_queue.put(a),
+                )
+                self.progress_queue.put(("done", result))
+            except Exception as e:
+                self.progress_queue.put(("error", str(e)))
+
+        self.worker_thread = threading.Thread(target=worker, daemon=True)
+        self.worker_thread.start()
+        self.root.after(100, self._poll_queue)
+
+    def _poll_queue(self):
+        try:
+            while True:
+                msg = self.progress_queue.get_nowait()
+                kind = msg[0]
+
+                if kind == "stage":
+                    self.status_label.config(text=msg[1])
+                    self._log(msg[1])
+                    if msg[1] in ("바탕화면에 결과 폴더 생성 중...", "완료"):
+                        self.progress.stop()
+                        self.progress.config(mode="determinate")
+                        self.progress["value"] = 100 if msg[1] == "완료" else 95
+
+                elif kind == "extract":
+                    self.status_label.config(text=f"압축 해제 중... ({msg[1]}개)")
+
+                elif kind == "hash":
+                    done, total = msg[1], msg[2]
+                    self.progress.stop()
+                    self.progress.config(mode="determinate")
+                    pct = (done / total * 100) if total else 0
+                    self.progress["value"] = pct
+                    self.status_label.config(text=f"이미지 해시 계산 중... ({done}/{total})")
+
+                elif kind == "done":
+                    self._on_process_done(msg[1])
+                    return
+
+                elif kind == "error":
+                    self._on_process_error(msg[1])
+                    return
+        except queue.Empty:
+            pass
+
+        self.root.after(100, self._poll_queue)
+
+    def _on_process_done(self, result: core.ProcessResult):
+        self.result = result
+        self.progress.stop()
+        self.progress.config(mode="determinate")
+        self.progress["value"] = 100
+        self.start_btn.config(state="normal")
+        self.open_folder_btn.config(state="normal" if result.output_dir else "disabled")
+        self.preview_btn.config(state="normal" if any(g.excluded for g in result.groups) else "disabled")
+
+        folder_line = (
+            f"결과 폴더(바탕화면): {result.output_dir}" if result.output_dir
+            else "처리 가능한 사진이 없어 결과 폴더를 생성하지 않았습니다."
+        )
+        summary = (
+            f"전체 사진 수: {len(result.all_items)}   "
+            f"고유 사진 수: {result.unique_count}   "
+            f"제거된 중복 수: {result.removed_count}   "
+            f"읽기 실패: {len(result.failed_items)}\n"
+            f"{folder_line}"
+        )
+        self.summary_label.config(text=summary)
+        self.status_label.config(text="완료")
+        self._log(f"완료. {folder_line}")
+        if result.failed_items:
+            self._log("읽기 실패 목록:")
+            for it in result.failed_items:
+                self._log(f"  - {it.display_name} ({it.source_zip}/{it.archive_name}): {it.read_error}")
+        if result.extract_errors:
+            for e in result.extract_errors:
+                self._log(f"[경고] {e}")
+
+        if self._auto_open_order_editor:
+            self._auto_open_order_editor = False
+            self._on_edit_order()
+
+    def _on_process_error(self, message: str):
+        self._auto_open_order_editor = False
+        self.progress.stop()
+        self.progress.config(mode="determinate", value=0)
+        self.start_btn.config(state="normal")
+        self.status_label.config(text="오류 발생")
+        self.summary_label.config(text="처리 중 오류가 발생했습니다.")
+        self._log(f"[오류] {message}")
+        messagebox.showerror(APP_TITLE, f"처리 중 오류가 발생했습니다:\n{message}")
+
+    # ------------------------------------------------------------------
+    # 결과 액션
+    # ------------------------------------------------------------------
+    def _open_in_explorer(self, path: str):
+        if os.path.isdir(path):
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+
+    def _open_result_viewer(self, path: str):
+        """결과 폴더를 FastStone Image Viewer로 열어본다. 설치돼 있지 않으면 탐색기로 대신 연다."""
+        if not os.path.isdir(path):
+            return
+        faststone = find_faststone_exe()
+        if faststone:
+            try:
+                subprocess.Popen([faststone, path])
+                return
+            except Exception:
+                pass
+        self._open_in_explorer(path)
+
+    def _on_edit_order(self):
+        if not self.result or not os.path.isdir(self.result.output_dir):
+            return
+        items = sorted([g.kept for g in self.result.groups], key=lambda it: it.order_index)
+        if not items:
+            messagebox.showinfo(APP_TITLE, "정리된 사진이 없습니다.")
+            return
+        OrderEditor(self, items, source_zip_paths=self.last_zip_paths)
+
+    def _on_preview(self):
+        if not self.result:
+            return
+        dup_groups = [g for g in self.result.groups if g.excluded]
+        if not dup_groups:
+            messagebox.showinfo(APP_TITLE, "제외된 중복 사진이 없습니다.")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("제외된 중복 사진 미리보기")
+        win.geometry("700x600")
+
+        canvas = tk.Canvas(win)
+        scrollbar = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        local_thumb_cache = []
+
+        for gi, g in enumerate(dup_groups, 1):
+            group_frame = tk.LabelFrame(inner, text=f"그룹 {gi}", padx=6, pady=6)
+            group_frame.pack(fill="x", padx=8, pady=6)
+
+            row = tk.Frame(group_frame)
+            row.pack(fill="x")
+            self._add_thumb(row, g.kept, "유지", "#2e7d32", local_thumb_cache)
+            for e in g.excluded:
+                self._add_thumb(row, e, "제외", "#c62828", local_thumb_cache)
+
+        win.thumb_cache = local_thumb_cache  # 창이 열려있는 동안 참조 유지
+        self._enable_drag_scroll(canvas, inner)
+
+    def _enable_drag_scroll(self, canvas: tk.Canvas, inner: tk.Frame):
+        """캔버스 안 어디를 클릭/드래그해도(자식 위젯 포함) 위아래로 스크롤되도록 한다.
+
+        자식 위젯에서 발생한 마우스 이벤트는 캔버스로 자동 전파되지 않으므로
+        모든 하위 위젯에 동일한 핸들러를 재귀적으로 바인딩한다. 좌표는 위젯마다
+        원점이 달라지므로 화면 절대좌표(x_root/y_root)를 기준으로 delta를 계산한다.
+        """
+
+        def start_drag(event):
+            canvas.scan_mark(event.x_root, event.y_root)
+            canvas.config(cursor="fleur")
+
+        def do_drag(event):
+            canvas.scan_dragto(event.x_root, event.y_root, gain=1)
+
+        def end_drag(_event):
+            canvas.config(cursor="hand2")
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def bind_widget(widget):
+            widget.config(cursor="hand2")
+            widget.bind("<ButtonPress-1>", start_drag)
+            widget.bind("<B1-Motion>", do_drag)
+            widget.bind("<ButtonRelease-1>", end_drag)
+            widget.bind("<MouseWheel>", on_mousewheel)
+            for child in widget.winfo_children():
+                bind_widget(child)
+
+        canvas.config(cursor="hand2")
+        canvas.bind("<ButtonPress-1>", start_drag)
+        canvas.bind("<B1-Motion>", do_drag)
+        canvas.bind("<ButtonRelease-1>", end_drag)
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        bind_widget(inner)
+
+    def _add_thumb(self, parent, item: core.PhotoItem, tag: str, color: str, cache: list):
+        cell = tk.Frame(parent, padx=4)
+        cell.pack(side="left")
+        try:
+            img = Image.open(item.extracted_path)
+            img.thumbnail(THUMB_SIZE)
+            photo = ImageTk.PhotoImage(img)
+            cache.append(photo)
+            tk.Label(cell, image=photo).pack()
+        except Exception:
+            tk.Label(cell, text="(미리보기 실패)", width=14, height=6).pack()
+        tk.Label(cell, text=tag, fg=color, font=("", 9, "bold")).pack()
+        tk.Label(cell, text=item.display_name, wraplength=110, justify="center").pack()
+
+    # ------------------------------------------------------------------
+    # 로그 / 종료
+    # ------------------------------------------------------------------
+    def _log(self, text: str):
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", text + "\n")
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def _log_clear(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+
+    def _on_close(self):
+        if self.work_dir and os.path.isdir(self.work_dir):
+            shutil.rmtree(self.work_dir, ignore_errors=True)
+        self.root.destroy()
+
+
+class OrderEditor:
+    """'결과 폴더 열기'를 누르면 뜨는 사진 순서 편집 창.
+
+    바로 탐색기를 열지 않고, 큰 화면(기본 최대화)에 정리된 사진을 순서대로 늘어놓아
+    사용자가 여러 장을 선택해 위/아래로 옮기거나 마우스로 드래그해 순서를 바꿀 수 있게 한다.
+    "최종 결과폴더로 보내기"를 눌러야만 실제로 파일명이 그 순서(순번_원본파일명)로 바뀌고,
+    원본 zip 파일이 휴지통으로 이동하며, 그 뒤에 결과 폴더가 FastStone Image Viewer(설치돼
+    있으면)로 열린다(없으면 탐색기로 대신 연다).
+
+    성능/깜빡임 대책: 사진 목록의 구성(멤버십)은 편집 중 절대 바뀌지 않고 순서만 바뀌므로,
+    각 사진의 썸네일과 셀(Frame) 위젯을 처음 한 번만 만들어 재사용한다. 선택 상태 변경은
+    테두리 색만 바꾸고, 순서 변경은 기존 위젯을 새 grid 위치로 재배치(regrid)할 뿐 위젯을
+    파괴/재생성하지 않는다 - 매번 위젯을 지웠다 다시 그리던 예전 방식이 클릭할 때마다
+    화면이 깜빡이고 느리게 느껴지던 원인이었다.
+    """
+
+    COLUMNS_MIN = 3
+    THUMB_SIZE = (150, 150)
+    CELL_PAD = 6
+    CELL_EXTRA_W = 30  # 셀 테두리/여백을 대략 감안한 여유폭 (썸네일 크기 자체는 고정)
+    NORMAL_BORDER = "#cccccc"
+    SELECTED_BORDER = "#2f7dd1"
+    DROP_TARGET_BORDER = "#ff9800"
+
+    def __init__(self, app: DedupApp, items: list, source_zip_paths: list | None = None):
+        self.app = app
+        self.output_dir = Path(app.result.output_dir)
+        self.source_zip_paths = list(source_zip_paths or [])  # 확정 시 휴지통으로 보낼 원본 zip 경로
+        self.items = list(items)  # 현재 화면상의 순서
+        self.selected: set = set()
+        self.anchor_item = None  # shift-클릭 범위 선택의 기준점
+        self.hover_item = None  # 드래그 중 마우스 아래 있는 삽입 대상(미리보기 표시용)
+        self.thumb_cache: list = []  # PhotoImage 참조 유지용(가비지 컬렉션 방지)
+        self.thumb_images: dict = {}  # id(item) -> PhotoImage (한 번만 생성, 재사용)
+        self.cells: dict = {}  # id(item) -> 셀 Frame (한 번만 생성, 재사용)
+        self.badges: dict = {}  # id(item) -> 순번 배지 Label
+        self.deleted_items: list = []  # Delete 키로 제외 표시된 사진(확정 시 실제로 삭제됨)
+        self.history: list = []  # 실행 취소(Ctrl+Z)용 스냅샷 스택: (items, deleted_items) 튜플들
+        self.drag_item = None
+        self.drag_start = None
+        self.dragging = False
+        self._shift_held = False
+        self.columns = self.COLUMNS_MIN
+
+        self.win = tk.Toplevel(app.root)
+        self.win.title("사진 순서 정리")
+        self._size_window()
+        self._build_ui()
+        self.win.update_idletasks()
+        self._preload_thumbnails()
+        self._build_cells()
+        self._recompute_columns(force=True)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
+        self.win.bind("<Delete>", self._on_delete_key)
+        self.win.bind("<Control-z>", self._on_undo)
+        self.win.bind("<Control-Z>", self._on_undo)
+        self.win.focus_set()
+
+    def _size_window(self):
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        w, h = int(sw * 0.9), int(sh * 0.9)
+        x, y = (sw - w) // 2, (sh - h) // 2
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self.win.minsize(1000, 700)
+        try:
+            self.win.state("zoomed")  # 큰 화면(최대화 상태)으로 열어 편집하기 편하게
+        except tk.TclError:
+            pass
+
+    def _build_ui(self):
+        top = tk.Frame(self.win, padx=10, pady=8)
+        top.pack(fill="x")
+
+        tk.Label(
+            top,
+            text="사진을 클릭해 선택(Shift+클릭으로 범위 선택)한 뒤 '선택 위로/아래로' 버튼이나 "
+                 "마우스 드래그로 순서를 바꾸세요.\nDelete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소",
+            fg="#555555", justify="left",
+        ).pack(side="left")
+
+        btn_frame = tk.Frame(top)
+        btn_frame.pack(side="right")
+        tk.Button(btn_frame, text="선택 위로", command=lambda: self._move_selected(-1)).pack(side="left", padx=3)
+        tk.Button(btn_frame, text="선택 아래로", command=lambda: self._move_selected(1)).pack(side="left", padx=3)
+        tk.Button(btn_frame, text="선택 해제", command=self._clear_selection).pack(side="left", padx=3)
+        tk.Button(btn_frame, text="닫기 (변경 취소)", command=self.win.destroy).pack(side="left", padx=3)
+        tk.Button(
+            btn_frame, text="최종 결과폴더로 보내기", command=self._confirm,
+            bg="#2f7dd1", fg="white", font=("", 10, "bold"),
+        ).pack(side="left", padx=(12, 0))
+
+        self.status_label = tk.Label(self.win, text="", anchor="w", padx=10)
+        self.status_label.pack(fill="x")
+
+        body = tk.Frame(self.win)
+        body.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(body)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
+        self.inner = tk.Frame(self.canvas)
+        self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+
+    # ------------------------------------------------------------------
+    # 위젯/썸네일 준비 (한 번만 생성 후 재사용)
+    # ------------------------------------------------------------------
+    def _preload_thumbnails(self):
+        for item in self.items:
+            try:
+                img = Image.open(item.extracted_path)
+                img.thumbnail(self.THUMB_SIZE)
+                photo = ImageTk.PhotoImage(img)
+                self.thumb_cache.append(photo)
+                self.thumb_images[id(item)] = photo
+            except Exception:
+                self.thumb_images[id(item)] = None
+
+    def _build_cells(self):
+        for item in self.items:
+            cell, badge = self._make_cell(item)
+            self.cells[id(item)] = cell
+            self.badges[id(item)] = badge
+
+    def _make_cell(self, item: core.PhotoItem):
+        cell = tk.Frame(
+            self.inner, highlightthickness=3,
+            highlightbackground=self.NORMAL_BORDER, highlightcolor=self.NORMAL_BORDER, bg="white",
+        )
+
+        badge = tk.Label(cell, text="", bg=self.SELECTED_BORDER, fg="white", font=("", 9, "bold"), width=3)
+        badge.pack(anchor="w")
+
+        photo = self.thumb_images.get(id(item))
+        if photo is not None:
+            thumb_label = tk.Label(cell, image=photo, bg="white")
+        else:
+            thumb_label = tk.Label(cell, text="(미리보기 실패)", width=18, height=8, bg="white")
+        thumb_label.pack()
+
+        name_label = tk.Label(
+            cell, text=item.output_name or item.display_name, wraplength=self.THUMB_SIZE[0], bg="white",
+        )
+        name_label.pack()
+
+        for w in (cell, badge, thumb_label, name_label):
+            w.item_ref = item
+            w.bind("<ButtonPress-1>", self._on_press)
+            w.bind("<B1-Motion>", self._on_motion)
+            w.bind("<ButtonRelease-1>", self._on_release)
+
+        return cell, badge
+
+    # ------------------------------------------------------------------
+    # 배치 (창 크기에 맞춘 열 수 계산 + 재배치, 위젯은 그대로 재사용)
+    # ------------------------------------------------------------------
+    def _on_canvas_resize(self, event):
+        self._recompute_columns()
+
+    def _recompute_columns(self, force: bool = False):
+        width = self.canvas.winfo_width()
+        if width <= 1:
+            width = int(self.win.winfo_screenwidth() * 0.85)
+        cell_w = self.THUMB_SIZE[0] + self.CELL_EXTRA_W
+        cols = max(self.COLUMNS_MIN, width // cell_w)
+        if force or cols != self.columns:
+            self.columns = cols
+            self._relayout()
+
+    def _relayout(self):
+        for i, item in enumerate(self.items):
+            r, c = divmod(i, self.columns)
+            self.cells[id(item)].grid(row=r, column=c, padx=self.CELL_PAD, pady=self.CELL_PAD)
+            self.badges[id(item)].config(text=str(i + 1))
+        self.canvas.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._update_status()
+
+    def _update_status(self):
+        text = f"전체 {len(self.items)}장  |  선택 {len(self.selected)}장"
+        if self.deleted_items:
+            text += f"  |  제외 표시 {len(self.deleted_items)}장(확정 시 삭제됨)"
+        self.status_label.config(text=text)
+
+    # ------------------------------------------------------------------
+    # 실행 취소 (Ctrl+Z)
+    # ------------------------------------------------------------------
+    def _push_history(self):
+        self.history.append((list(self.items), list(self.deleted_items)))
+        if len(self.history) > 50:
+            self.history.pop(0)
+
+    def _on_undo(self, event=None):
+        if not self.history:
+            return
+        self.items, self.deleted_items = self.history.pop()
+        self.selected.clear()
+        self.anchor_item = None
+        self._relayout()
+        self._update_selection_visual()
+
+    # ------------------------------------------------------------------
+    # Delete 키: 선택한 사진을 목록에서 빼고 삭제 예정으로 표시 (실제 파일 삭제는 확정 시점)
+    # ------------------------------------------------------------------
+    def _on_delete_key(self, event=None):
+        if not self.selected:
+            return
+        self._push_history()
+        to_remove = [it for it in self.items if it in self.selected]
+        for item in to_remove:
+            self.cells[id(item)].grid_forget()
+        self.items = [it for it in self.items if it not in self.selected]
+        self.deleted_items.extend(to_remove)
+        self.selected.clear()
+        self.anchor_item = None
+        self._relayout()
+
+    # ------------------------------------------------------------------
+    # 선택 (클릭 토글 / Shift+클릭 범위 선택) - 위젯을 다시 만들지 않고 테두리 색만 갱신
+    # ------------------------------------------------------------------
+    def _border_color(self, item) -> str:
+        return self.SELECTED_BORDER if item in self.selected else self.NORMAL_BORDER
+
+    def _set_cell_border(self, item, color: str):
+        cell = self.cells.get(id(item))
+        if cell:
+            cell.configure(highlightbackground=color, highlightcolor=color)
+
+    def _update_selection_visual(self):
+        for item in self.items:
+            self._set_cell_border(item, self._border_color(item))
+        self._update_status()
+
+    def _clear_selection(self):
+        self.selected.clear()
+        self.anchor_item = None
+        self._update_selection_visual()
+
+    def _handle_click_selection(self, item, shift_held: bool):
+        if shift_held and self.anchor_item is not None and self.anchor_item in self.items:
+            i1 = self.items.index(self.anchor_item)
+            i2 = self.items.index(item)
+            lo, hi = min(i1, i2), max(i1, i2)
+            self.selected = set(self.items[lo:hi + 1])
+        else:
+            if item in self.selected:
+                self.selected.discard(item)
+            else:
+                self.selected.add(item)
+            self.anchor_item = item
+        self._update_selection_visual()
+
+    def _move_selected(self, direction: int):
+        if not self.selected:
+            return
+        idxs = sorted(i for i, it in enumerate(self.items) if it in self.selected)
+        if direction < 0 and idxs[0] == 0:
+            return
+        if direction > 0 and idxs[-1] == len(self.items) - 1:
+            return
+        self._push_history()
+        if direction < 0:
+            for i in idxs:
+                self.items[i - 1], self.items[i] = self.items[i], self.items[i - 1]
+        else:
+            for i in reversed(idxs):
+                self.items[i + 1], self.items[i] = self.items[i], self.items[i + 1]
+        self._relayout()
+
+    # ------------------------------------------------------------------
+    # 드래그 (선택된 사진 함께 이동 + 놓일 위치 실시간 표시)
+    # ------------------------------------------------------------------
+    def _widget_item(self, widget):
+        w = widget
+        while w is not None:
+            item = getattr(w, "item_ref", None)
+            if item is not None:
+                return item
+            if w is self.inner or w is self.win:
+                return None
+            w = w.master
+        return None
+
+    def _on_press(self, event):
+        self.drag_item = self._widget_item(event.widget)
+        self.drag_start = (event.x_root, event.y_root)
+        self.dragging = False
+        self._shift_held = bool(event.state & 0x0001)
+
+    def _on_motion(self, event):
+        if self.drag_item is None or self.drag_start is None:
+            return
+        dx = event.x_root - self.drag_start[0]
+        dy = event.y_root - self.drag_start[1]
+        if not self.dragging and (abs(dx) > 6 or abs(dy) > 6):
+            self.dragging = True
+            self.win.config(cursor="fleur")
+        if self.dragging:
+            self._update_drop_target(event)
+
+    def _update_drop_target(self, event):
+        target_widget = self.win.winfo_containing(event.x_root, event.y_root)
+        target_item = self._widget_item(target_widget) if target_widget else None
+        if target_item is self.hover_item:
+            return
+        if self.hover_item is not None:
+            self._set_cell_border(self.hover_item, self._border_color(self.hover_item))
+        self.hover_item = target_item
+        if target_item is not None and target_item is not self.drag_item:
+            self._set_cell_border(target_item, self.DROP_TARGET_BORDER)
+
+    def _on_release(self, event):
+        if self.drag_item is None:
+            return
+        if not self.dragging:
+            self._handle_click_selection(self.drag_item, self._shift_held)
+        else:
+            self.win.config(cursor="")
+            if self.hover_item is not None:
+                self._set_cell_border(self.hover_item, self._border_color(self.hover_item))
+            self._reorder_to(self.drag_item, self.hover_item)
+            self.hover_item = None
+
+        self.drag_item = None
+        self.drag_start = None
+        self.dragging = False
+
+    def _reorder_to(self, dragged_item, target_item):
+        if target_item is None or target_item is dragged_item:
+            return
+        # 끌기 시작한 사진이 현재 선택 목록에 포함돼 있으면, 선택된 사진 전체를 함께 옮긴다.
+        moving = set(self.selected) if dragged_item in self.selected and self.selected else {dragged_item}
+        if target_item in moving:
+            return
+        self._push_history()
+        moving_ordered = [it for it in self.items if it in moving]
+        remaining = [it for it in self.items if it not in moving]
+        target_pos = remaining.index(target_item)
+        self.items = remaining[:target_pos] + moving_ordered + remaining[target_pos:]
+        self._relayout()
+
+    def _confirm(self):
+        total_kept = len(self.items)
+        total_deleted = len(self.deleted_items)
+        zip_paths = [p for p in self.source_zip_paths if os.path.isfile(p)]
+
+        msg = f"현재 화면에 보이는 순서대로 {total_kept}장의 파일명을 변경합니다."
+        if total_deleted:
+            msg += f"\nDelete로 제외 표시한 {total_deleted}장은 결과 폴더에서 완전히 삭제됩니다."
+        if zip_paths:
+            names = ", ".join(Path(p).name for p in zip_paths)
+            msg += f"\n원본 zip 파일({names})은 휴지통으로 보내집니다."
+        msg += "\n계속할까요?"
+        if not messagebox.askyesno(APP_TITLE, msg):
+            return
+
+        width = max(3, len(str(total_kept))) if total_kept else 3
+        try:
+            # 1단계: 이름 충돌을 피하기 위해 남길 사진들을 전부 임시 이름으로 바꾼다.
+            temp_names = []
+            for item in self.items:
+                src = self.output_dir / item.output_name
+                tmp_name = f"__order_tmp_{uuid.uuid4().hex}{Path(item.output_name).suffix}"
+                src.rename(self.output_dir / tmp_name)
+                temp_names.append(tmp_name)
+
+            # 2단계: 순번_원본파일명 형태의 최종 이름으로 바꾼다.
+            for idx, (item, tmp_name) in enumerate(zip(self.items, temp_names), start=1):
+                base = _strip_order_prefix(item.output_name)
+                final_name = f"{idx:0{width}d}_{base}"
+                (self.output_dir / tmp_name).rename(self.output_dir / final_name)
+                item.output_name = final_name
+
+            # 3단계: Delete로 제외 표시한 사진들은 이 시점에 실제로 삭제한다.
+            delete_errors = []
+            for item in self.deleted_items:
+                try:
+                    (self.output_dir / item.output_name).unlink(missing_ok=True)
+                except Exception as e:
+                    delete_errors.append(f"{item.output_name}: {e}")
+
+            # 4단계: 원본 zip 파일을 휴지통으로 보낸다 (완전 삭제가 아니라 복구 가능하게).
+            zip_errors = []
+            for zp in zip_paths:
+                try:
+                    send2trash(zp)
+                except Exception as e:
+                    zip_errors.append(f"{Path(zp).name}: {e}")
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"파일명 변경 중 오류가 발생했습니다:\n{e}")
+            return
+
+        summary = f"완료했습니다. (유지 {total_kept}장"
+        summary += f", 삭제 {total_deleted}장)" if total_deleted else ")"
+        if zip_paths:
+            summary += f"\n원본 zip {len(zip_paths) - len(zip_errors)}개를 휴지통으로 보냈습니다."
+        if delete_errors:
+            summary += "\n\n일부 사진 삭제 실패:\n" + "\n".join(delete_errors)
+        if zip_errors:
+            summary += "\n\n일부 zip 삭제 실패:\n" + "\n".join(zip_errors)
+        messagebox.showinfo(APP_TITLE, summary)
+        self.app._open_result_viewer(str(self.output_dir))
+        self.win.destroy()
+
+
+def main(auto_zip_paths: list | None = None):
+    if _HAS_DND:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
+    app = DedupApp(root)
+    if auto_zip_paths:
+        root.after(200, lambda: app.run_auto(auto_zip_paths))
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### `requirements.txt`
+```text
+Pillow>=10.0.0
+imagehash>=4.3.1
+tkinterdnd2>=0.3.0
+send2trash>=1.8.0
+pyinstaller>=6.0.0
+```
+
+### `build.bat`
+```bat
+@echo off
+REM 중복 사진 정리 도구 - exe 빌드 + 설치 프로그램(installer) 빌드 스크립트
+REM 사용법: venv 안에서 이 배치파일을 실행하세요.
+REM   PhotoDedup> venv\Scripts\activate
+REM   PhotoDedup> build.bat
+
+pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
+    --collect-all tkinterdnd2 ^
+    --collect-all imagehash ^
+    main.py
+
+echo.
+echo exe 빌드 완료: dist\PhotoDedup.exe
+
+REM Inno Setup(ISCC.exe)이 설치되어 있으면 설치 프로그램(Setup.exe)도 함께 빌드합니다.
+REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.php)
+set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
+if exist %ISCC% (
+    %ISCC% installer.iss
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.0.0.exe
+) else (
+    echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
+    echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
+)
+
+pause
+```
+
+### `installer.iss`
+```ini
+; 중복 사진 정리 도구 (PhotoDedup) - Inno Setup 설치 스크립트
+; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
+
+#define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
+#define MyAppVersion "1.0.0"
+#define MyAppExeName "PhotoDedup.exe"
+
+[Setup]
+AppId={{8F1E9C2E-7B3A-4C5D-9E1F-2A6B8C4D7E10}}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+DefaultDirName={autopf}\PhotoDedup
+DefaultGroupName=PhotoDedup
+DisableProgramGroupPage=yes
+OutputDir=installer_output
+OutputBaseFilename=PhotoDedup_Setup_{#MyAppVersion}
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+UninstallDisplayIcon={app}\{#MyAppExeName}
+ArchitecturesInstallIn64BitMode=x64compatible
+
+[Languages]
+Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "contextmenu"; Description: "탐색기에서 zip 파일 우클릭 시 ""중복 사진 정리 도구로 열기"" 메뉴 추가 (zip의 기본 열기 동작은 바뀌지 않습니다)"; GroupDescription: "탐색기 통합"
+
+[Files]
+Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+; zip의 기본(더블클릭) 연결 프로그램은 그대로 두고, 우클릭 메뉴에 항목만 추가한다.
+Root: HKCR; Subkey: "SystemFileAssociations\.zip\shell\PhotoDedup"; ValueType: string; ValueName: ""; ValueData: "중복 사진 정리 도구로 열기"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKCR; Subkey: "SystemFileAssociations\.zip\shell\PhotoDedup"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExeName}"""; Tasks: contextmenu
+Root: HKCR; Subkey: "SystemFileAssociations\.zip\shell\PhotoDedup\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+```
+
+---
+
+## 7. 데이터베이스/스키마
+
+**해당 없음.** 이 프로그램은 데이터베이스를 전혀 사용하지 않습니다. 모든 상태는 프로그램 실행 중
+메모리 안에서만 유지되며(파이썬 `dataclass` 객체들), 영구 저장되는 것은 아래 두 가지뿐입니다.
+
+1. 처리 결과 사진 파일들 — 바탕화면의 `결과_유니크사진_YYYYMMDD_HHMMSS` 폴더
+2. (선택) Inno Setup 설치 시 등록되는 레지스트리 값 몇 개 — 위 `installer.iss`의 `[Registry]` 섹션 참고 (제거 시 자동 삭제됨)
+
+마이그레이션 파일, 시드 데이터도 없습니다.
+
+---
+
+## 8. 검증 방법
+
+### 8-1. 테스트용 zip 만들기
+아래 스크립트를 `make_test_zip.py`로 저장하고 실행하면, 다음이 섞인 검증용 zip이 만들어집니다:
+- 완전히 같은 사진이 2번 들어있는 경우 (`001_first.jpg`, `003_exact_copy.jpg`)
+- 같은 사진을 재압축(화질만 다르게)한 경우 (`002_recompressed.jpg`)
+- 서로 다른 고유 사진 2장 (`004_green.png`, `006_blue.jpg`)
+- 이미지가 아닌 파일 (`readme.txt` - 무시되어야 함)
+- 손상된 이미지 파일 (`005_broken.jpg` - "읽기 실패"로 처리되어야 함)
+
+```python
+import io
+import random
+import zipfile
+from PIL import Image, ImageDraw
+
+def make_img(seed, size=(200, 200)):
+    rnd = random.Random(seed)
+    img = Image.new("RGB", size, (20, 20, 20))
+    d = ImageDraw.Draw(img)
+    for _ in range(40):
+        x0, y0 = rnd.randint(0, 180), rnd.randint(0, 180)
+        x1, y1 = x0 + rnd.randint(5, 40), y0 + rnd.randint(5, 40)
+        color = (rnd.randint(0, 255), rnd.randint(0, 255), rnd.randint(0, 255))
+        d.rectangle([x0, y0, x1, y1], fill=color)
+    return img
+
+buf_a = io.BytesIO()
+img_a = make_img("A")
+img_a.save(buf_a, format="JPEG", quality=95)
+bytes_a = buf_a.getvalue()
+
+buf_a2 = io.BytesIO()
+img_a.save(buf_a2, format="JPEG", quality=70)
+bytes_a2 = buf_a2.getvalue()
+
+buf_b = io.BytesIO()
+img_b = make_img("B")
+img_b.save(buf_b, format="PNG")
+bytes_b = buf_b.getvalue()
+
+buf_c = io.BytesIO()
+img_c = make_img("C")
+img_c.save(buf_c, format="JPEG", quality=95)
+bytes_c = buf_c.getvalue()
+
+corrupted = b"not a real image"
+
+import sys
+out = sys.argv[1] if len(sys.argv) > 1 else "test_photos.zip"
+with zipfile.ZipFile(out, "w") as zf:
+    zf.writestr("001_first.jpg", bytes_a)
+    zf.writestr("002_recompressed.jpg", bytes_a2)
+    zf.writestr("003_exact_copy.jpg", bytes_a)
+    zf.writestr("readme.txt", b"not an image, should be ignored")
+    zf.writestr("004_green.png", bytes_b)
+    zf.writestr("005_broken.jpg", corrupted)
+    zf.writestr("006_blue.jpg", bytes_c)
+
+print("done:", out)
+```
+
+### 8-2. CLI로 핵심 로직 검증
+```bash
+venv\Scripts\activate
+python make_test_zip.py test_photos.zip
+python main.py test_photos.zip --threshold 5
+```
+
+**기대되는 출력 (핵심 부분)**:
+```
+>> 압축 해제 중...
+>> 이미지 해시 계산 중...
+   해시 계산 6/6
+>> 중복 그룹 분석 중...
+>> 바탕화면에 결과 폴더 생성 중...
+>> 완료
+
+전체 사진 수     : 6
+고유 사진 수     : 3
+제거된 중복 수   : 2
+읽기 실패 수     : 1
+읽기 실패 목록:
+   - 005_broken.jpg (test_photos.zip/005_broken.jpg): UnidentifiedImageError: cannot identify image file ...
+
+결과 폴더(바탕화면): C:\Users\<사용자명>\Desktop\결과_유니크사진_YYYYMMDD_HHMMSS
+```
+이 결과 폴더 안에는 `001_first.jpg`, `004_green.png`, `006_blue.jpg` 3개 파일만 있어야 합니다
+(재압축본과 완전동일 복사본은 제외되고, 손상 파일은 아예 안 들어가고, `readme.txt`는 무시됩니다).
+**이 숫자(전체 6 / 고유 3 / 제거 2 / 읽기실패 1)와 정확히 일치해야 core.py 로직이 올바르게
+재현된 것입니다.**
+
+### 8-3. GUI 동작 확인
+```bash
+python main.py
+```
+1. "파일 선택..."을 눌러 `test_photos.zip`을 선택 (기본 경로가 다운로드 폴더로 열리는지 확인)
+2. "처리 시작" 클릭 → 진행률 표시줄이 움직이고 잠시 후 요약이 표시되는지 확인
+3. "제외된 중복 사진 미리보기" 클릭 → 그룹 1개(유지 1장 + 제외 2장)가 보이는지, 마우스로 드래그해서 스크롤되는지 확인
+4. "결과 폴더 열기" 클릭 → 사진 순서 정리 창이 (최대화 상태로) 뜨는지 확인
+5. 사진 1장을 클릭 → 파란 테두리로 선택되는지, Shift+클릭으로 범위 선택되는지 확인
+6. 사진을 마우스로 드래그 → 놓일 위치가 주황 테두리로 표시되는지 확인
+7. 사진 선택 후 Delete → 화면에서 사라지고 상태표시줄에 "제외 표시 1장"이 뜨는지 확인
+8. Ctrl+Z → 방금 지운 사진이 되돌아오는지 확인
+9. "최종 결과폴더로 보내기" 클릭 → 확인 팝업(zip 삭제 안내 포함)이 뜨고, 확인하면 결과 폴더의 파일명이
+   `001_...`, `002_...` 형태로 바뀌고, FastStone Image Viewer(설치돼 있으면) 또는 탐색기가 열리는지 확인
+
+### 8-4. exe 빌드 검증
+```bash
+pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
+    --collect-all tkinterdnd2 --collect-all imagehash main.py
+dist\PhotoDedup.exe
+```
+- 콘솔 창 없이 GUI 창만 뜨는지 확인
+- `dist\PhotoDedup.exe test_photos.zip` 처럼 zip 경로를 인자로 주고 실행하면, 파일 선택 → 처리 시작 →
+  결과 폴더 열기까지 **자동으로** 진행되고 "최종 결과폴더로 보내기"에서 멈추는지 확인 (자동실행 기능 검증)
+
+### 8-5. 설치 프로그램 빌드/설치/제거 검증
+```powershell
+"%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
+installer_output\PhotoDedup_Setup_1.0.0.exe
+```
+- 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
+- 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
+- zip의 **기본(더블클릭) 프로그램은 바뀌지 않았는지** 확인 (설치 전/후 동일해야 함)
+- "프로그램 추가/제거"에서 제거했을 때 설치 폴더, 시작메뉴/바탕화면 바로가기, 위 컨텍스트 메뉴
+  레지스트리가 모두 깨끗이 삭제되는지 확인
+
+> Git Bash(MSYS)에서 설치 프로그램을 커맨드라인 옵션과 함께 직접 실행해 무음 설치를 테스트하려면
+> `/VERYSILENT` 대신 `//VERYSILENT`(슬래시 두 개)를 써야 합니다. 자세한 이유는 9번 트러블슈팅 참고.
+
+---
+
+## 9. 알려진 이슈 및 트러블슈팅
+
+### 9-1. Git Bash에서 설치 프로그램에 `/VERYSILENT` 같은 옵션을 주면 무시됨
+- **증상**: `PhotoDedup_Setup_1.0.0.exe /VERYSILENT /DIR=...`를 Git Bash에서 실행하면 무음 설치가 안 되고
+  일반 설치 마법사가 뜨거나, 예상치 못한 동작(자동으로 앱이 실행되는 등)이 발생함.
+- **원인**: Git Bash(MSYS)가 `/`로 시작하는 인자를 유닉스 경로로 착각해서, 예를 들어 `/VERYSILENT`를
+  `C:/Program Files/Git/VERYSILENT` 같은 엉뚱한 경로 문자열로 자동 치환해버림. `/DIR=C:\...`처럼 `=` 뒤에
+  이미 `C:\`로 시작하는 값이 오는 경우는 치환되지 않아 정상 동작하는 것과 대조적으로, `/VERYSILENT`처럼
+  `=`이 없는 단독 스위치만 이 문제가 생김.
+- **해결**: Inno Setup이 이 문제를 위해 지원하는 `//VERYSILENT`, `//SUPPRESSMSGBOXES` 처럼 **슬래시
+  두 개**로 시작하는 대체 표기를 사용하면 정상적으로 인식됨. (PowerShell이나 cmd.exe, 또는 탐색기에서
+  더블클릭 실행할 때는 이 문제가 아예 없음 - 순수 개발/테스트 편의를 위한 이슈였음.)
+
+### 9-2. PyInstaller `--windowed` 빌드는 콘솔 출력이 안 보임
+- **증상**: `dist\PhotoDedup.exe`를 실행했을 때 CLI 옵션(`--threshold` 등)을 줘도 콘솔 창이 없어서
+  결과를 볼 수 없음.
+- **원인**: `--windowed` 플래그로 빌드하면 콘솔이 완전히 분리되어(GUI 전용 서브시스템) `print()` 출력이
+  어디에도 보이지 않음.
+- **해결**: CLI 동작을 확인하고 싶을 때는 배포용 exe 대신 `python main.py ...`로 직접 실행할 것. exe는
+  항상 GUI 전용으로 쓰는 것을 전제로 설계함.
+
+### 9-3. tkinter `dataclass`가 기본값으로는 `set()`에 못 들어감
+- **증상**: `OrderEditor`에서 선택된 사진들을 `set()`에 담으려는데 `TypeError: unhashable type: 'PhotoItem'`
+  발생.
+- **원인**: `@dataclass`는 기본적으로 `eq=True`를 생성하는데, `eq=True`이면서 `frozen=False`인 경우
+  파이썬이 자동으로 `__hash__ = None`으로 만들어버려서 해시 불가능한 객체가 됨.
+- **해결**: `app/core.py`의 `PhotoItem`을 `@dataclass(eq=False)`로 선언해서 기본 객체 동일성(identity)
+  비교/해시를 쓰도록 함. 같은 사진의 서로 다른 인스턴스를 값으로 비교할 이유가 없으므로 이 방식이 적절함.
+
+### 9-4. tkinter 자식 위젯의 마우스 이벤트가 부모(Canvas)로 자동 전파되지 않음
+- **증상**: Canvas 위에 마우스 드래그로 스크롤(그랩 스크롤)을 구현했는데, Canvas의 빈 여백에서는
+  동작하지만 그 위에 올려둔 Label/Frame 위에서 드래그하면 스크롤이 안 됨.
+- **원인**: tkinter의 마우스 버튼 이벤트(`<ButtonPress-1>` 등)는 이벤트가 발생한 그 위젯에만 전달되고,
+  키보드 이벤트와 달리 상위 위젯으로 자동 버블링되지 않음.
+- **해결**: `_enable_drag_scroll()`에서 Canvas뿐 아니라 그 안의 모든 자식 위젯에 재귀적으로 동일한
+  이벤트 핸들러를 바인딩함. 좌표는 위젯마다 원점(0,0)이 다르므로, 상대좌표(`event.x`/`event.y`) 대신
+  화면 전체 기준 절대좌표(`event.x_root`/`event.y_root`)로 델타를 계산해서 어느 위젯에서 이벤트가
+  발생하든 일관되게 동작하도록 함. `OrderEditor`의 드래그-재정렬 기능도 같은 원리로 구현.
+
+### 9-5. `send2trash`가 PyInstaller로 빌드했을 때도 정상 동작하는지
+- **배경**: `send2trash.win`은 내부적으로 `try: pywin32 사용 / except ImportError: SHFileOperation(ctypes) 사용`
+  구조라, `pywin32`를 따로 설치하지 않아도 정상 동작함(레거시 경로 사용). 이 프로젝트의 `requirements.txt`에는
+  `pywin32`가 없고, 실제로 pywin32 없이 테스트해서 정상적으로 휴지통 이동이 되는 것을 확인함.
+- **주의**: PyInstaller 빌드 로그에 `win32com` 관련 "module not found" 경고가 나올 수 있는데, 이는
+  `try/except`로 이미 처리되는 정상적인 폴백 경로라 무시해도 됨 (실제로 빌드/실행 모두 문제없음).
+
+### 9-6. FastStone Image Viewer 경로를 못 찾는 경우
+- **증상**: 결과 폴더 확정 후 FastStone이 아니라 탐색기가 열림.
+- **원인**: `find_faststone_exe()`가 흔한 설치 경로 2곳과 레지스트리 `App Paths`를 확인하는데, 이례적인
+  경로에 설치했거나 아예 설치돼 있지 않으면 못 찾음.
+- **해결**: 이건 버그가 아니라 의도된 폴백 동작임 (FastStone은 필수 의존성이 아님). 특정 PC에서 항상
+  FastStone을 쓰고 싶다면 `app/gui.py`의 `_FASTSTONE_COMMON_PATHS` 리스트에 실제 설치 경로를 추가하면 됨.
+
+### 9-7. Windows 기본 zip 프로그램(ALZip/Bandizip 등)과 충돌하지 않는지
+- **확인 사항**: 이 프로젝트의 zip 우클릭 컨텍스트 메뉴는 `HKCR\SystemFileAssociations\.zip\shell\PhotoDedup`
+  에만 항목을 추가하고, `HKCR\.zip`(더블클릭 시 실행될 기본 프로그램)은 절대 수정하지 않음. 개발 중
+  실제로 ALZip이 기본 프로그램으로 설정된 PC에서 설치/제거를 테스트했고, 설치 전후로 기본 프로그램이
+  전혀 바뀌지 않는 것을 확인함.
+
+### 9-8. (개발 중 발생했던 사고, 재현 시 참고) 휴지통 관련 스크립트 실행 시 주의
+- 개발 과정에서 테스트 파일을 정리하던 중 `Clear-RecycleBin -Force`(PowerShell)를 실행해 시스템 휴지통
+  **전체**를 비운 적이 있음. 이 프로젝트 코드 자체에는 이런 명령이 전혀 없지만(코드는 `send2trash`로
+  개별 파일만 정확히 이동시킴), **재현/테스트 과정에서 휴지통을 다루는 스크립트를 직접 짤 때는
+  특정 파일만 지정해서 지우고, 절대 휴지통 전체를 비우는 명령을 쓰지 않도록 주의할 것.**
+
+### 9-9. (수정된 버그) zip이 아닌 파일을 넣었을 때 빈 결과 폴더가 생성되던 문제
+- **증상**: zip이 아닌 파일(예: PDF)을 "파일 선택"으로 직접 골랐거나 인자로 넘겼을 때, 처리할 사진이
+  하나도 없는데도 바탕화면에 `결과_유니크사진_YYYYMMDD_HHMMSS` 라는 **빈 폴더가 생성**됨.
+- **원인**: `core.process_zips()`가 `groups`(중복 그룹 결과)가 비어 있는지 확인하지 않고 항상
+  `write_output()`을 호출해 `output_dir.mkdir(...)`부터 실행했기 때문. zip이 아닌 파일은
+  `extract_zips()` 안의 `zipfile.ZipFile()`에서 `BadZipFile` 예외로 걸러지긴 하지만, 그 뒤 파이프라인은
+  빈 리스트로 계속 진행되어 결국 "결과 없음"인데도 폴더만 만들어버림. (`app/cli.py`의 `argparse`도
+  `zips` 인자의 확장자를 검사하지 않아서, 파일만 존재하면 zip이 아니어도 일단 파이프라인에 넘어감.)
+- **해결**: `process_zips()`에서 `if groups:` 로 감싸서, 남길 사진이 하나도 없으면 `write_output()`을
+  아예 호출하지 않고 `output_dir_str = ""`로 둠. GUI(`_on_process_done`)와 CLI(`main.py` 끝부분)는
+  `result.output_dir`이 빈 문자열이면 "처리 가능한 사진이 없어 결과 폴더를 생성하지 않았습니다."라고만
+  안내하고, "결과 폴더 열기" 버튼도 비활성화되도록 수정함. 이제 zip이 아닌 파일을 넣으면 바탕화면에
+  **아무 흔적도 남지 않음** (폴더도, 파일도 생성 안 됨).
