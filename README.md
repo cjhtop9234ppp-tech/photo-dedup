@@ -50,7 +50,7 @@ flowchart TD
 ### 방법 B — 소스코드 실행 (개발자용)
 
 ```bash
-git clone <이 저장소 URL>
+git clone https://github.com/cjhtop9234ppp-tech/photo-dedup.git
 cd photo-dedup
 python -m venv venv
 venv\Scripts\activate
