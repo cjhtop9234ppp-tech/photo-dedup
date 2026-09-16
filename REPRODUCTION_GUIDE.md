@@ -89,7 +89,7 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.1.3.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.4.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
@@ -234,7 +234,7 @@ pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.1.3.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.4.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -243,7 +243,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.3.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.4.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -1570,6 +1570,16 @@ class DedupApp:
     def _show_from_tray(self):
         self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
 
+    def _hide_to_tray_if_active(self):
+        """트레이 아이콘이 떠 있으면(감시를 한 번이라도 켠 적이 있으면) 메인 창을 다시 숨긴다.
+
+        "최종 결과폴더로 보내기" 확정 뒤에는 FastStone(사진편집기)만 화면에 남기고, 방금까지
+        쓰던 메인 창/순서 정리 창은 다시 트레이로 내려간다. 트레이 아이콘이 없으면(감시를
+        켠 적이 없으면) 숨길 경우 다시 열 방법이 없으므로 그대로 둔다.
+        """
+        if self.tray_icon is not None:
+            self.root.withdraw()
+
     def _quit_from_tray(self):
         self.root.after(0, self._shutdown)
 
@@ -2293,18 +2303,19 @@ class OrderEditor:
             messagebox.showerror(APP_TITLE, f"파일명 변경 중 오류가 발생했습니다:\n{e}")
             return
 
-        summary = f"완료했습니다. (유지 {total_kept}장"
-        summary += f", 삭제 {total_deleted}장)" if total_deleted else ")"
-        if zip_paths:
-            summary += f"\n원본 zip {len(zip_paths) - len(zip_errors)}개를 휴지통으로 보냈습니다."
-        if delete_errors:
-            summary += "\n\n일부 사진 삭제 실패:\n" + "\n".join(delete_errors)
-        if zip_errors:
-            summary += "\n\n일부 zip 삭제 실패:\n" + "\n".join(zip_errors)
-        messagebox.showinfo(APP_TITLE, summary)
+        # 문제가 없었으면 완료 팝업 없이 곧바로 FastStone(사진편집기)만 뜨게 한다.
+        # 삭제 실패 등 사람이 알아야 할 문제가 있을 때만 경고 팝업을 보여준다.
+        if delete_errors or zip_errors:
+            warning = "일부 작업이 실패했습니다."
+            if delete_errors:
+                warning += "\n\n일부 사진 삭제 실패:\n" + "\n".join(delete_errors)
+            if zip_errors:
+                warning += "\n\n일부 zip 삭제 실패:\n" + "\n".join(zip_errors)
+            messagebox.showwarning(APP_TITLE, warning)
         self.app._open_result_viewer(str(self.output_dir))
         self.win.destroy()
         self.app._on_order_editor_closed()
+        self.app._hide_to_tray_if_active()
 
 
 def main(auto_zip_paths: list | None = None, start_hidden: bool = False):
@@ -2358,7 +2369,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.3.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.4.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2373,7 +2384,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.3"
+#define MyAppVersion "1.1.4"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2551,7 +2562,7 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.1.3.exe
+installer_output\PhotoDedup_Setup_1.1.4.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
@@ -2698,6 +2709,22 @@ installer_output\PhotoDedup_Setup_1.1.3.exe
   인스턴스에 "창만 보여달라"는 요청이 전달됨(`app/singleinstance.py`). (2) 트레이 아이콘을
   더블클릭 - `app/tray.py`에서 "창 열기" 메뉴 항목을 `default=True`로 지정해서, 트레이 아이콘의
   기본 동작(더블클릭)이 곧바로 창 열기가 되도록 함.
+- **(v1.1.4 추가)** "최종 결과폴더로 보내기" 확정이 성공하면 안내 팝업 없이 곧바로
+  FastStone(사진편집기)만 화면에 남고, 메인 창은 트레이 아이콘이 떠 있으면 다시 숨겨진다
+  (`OrderEditor._confirm()` 끝에서 `self.app._hide_to_tray_if_active()` 호출). 삭제 실패 등
+  예외적인 문제가 있을 때만 경고 팝업이 뜬다. "계속할까요?" 확인 팝업은 그대로 유지된다.
+
+### 9-12b. (개발 환경 참고사항) GUI 버튼을 PowerShell로 자동 클릭해서 검증하려 하면 신뢰할 수 없음
+- **증상**: `SetCursorPos`/`mouse_event`/`SendInput`으로 화면 좌표를 클릭하거나 심지어
+  `SendMessage`로 `BM_CLICK`을 보내도, tkinter 버튼의 `command` 콜백이 실행되지 않는 경우가
+  있었음. `SetForegroundWindow`를 호출해도 실제로 포그라운드가 그 창으로 안 바뀔 때도 있었음
+  (Windows가 "포그라운드를 뺏는 것"을 다른 프로세스가 함부로 못 하게 막는 보안 동작).
+- **결론**: 이 환경에서 실제 OS 레벨 클릭 자동화로 tkinter GUI를 검증하는 것은 신뢰할 수 없다.
+  버튼 동작(콜백 로직)을 검증할 때는 `unittest.mock`으로 위젯의 `command`가 호출하는 메서드를
+  **직접 호출**해서(예: `editor._confirm()`), `messagebox`/서브프로세스 호출 등을
+  `mock.patch`로 가로채 확인하는 방식이 훨씬 안정적이다. 화면에 실제로 보이는지 자체를
+  확인해야 할 때만(버튼 클릭이 아니라 레이아웃/텍스트 확인 목적) 스크린샷 방식을 쓰고,
+  버튼을 "누르는" 동작 자체는 자동화하지 말 것.
 
 ### 9-12. (v1.1.0~v1.1.2에서 발생, v1.1.3에서 수정된 버그) 같은 파일명으로 zip을 다시 다운로드해도 감시가 반응하지 않음
 - **증상**: 감시 폴더에 이미 같은 이름의 zip이 있던 상태에서, 그 이름 그대로 다시

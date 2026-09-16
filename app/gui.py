@@ -380,6 +380,16 @@ class DedupApp:
     def _show_from_tray(self):
         self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
 
+    def _hide_to_tray_if_active(self):
+        """트레이 아이콘이 떠 있으면(감시를 한 번이라도 켠 적이 있으면) 메인 창을 다시 숨긴다.
+
+        "최종 결과폴더로 보내기" 확정 뒤에는 FastStone(사진편집기)만 화면에 남기고, 방금까지
+        쓰던 메인 창/순서 정리 창은 다시 트레이로 내려간다. 트레이 아이콘이 없으면(감시를
+        켠 적이 없으면) 숨길 경우 다시 열 방법이 없으므로 그대로 둔다.
+        """
+        if self.tray_icon is not None:
+            self.root.withdraw()
+
     def _quit_from_tray(self):
         self.root.after(0, self._shutdown)
 
@@ -1103,18 +1113,19 @@ class OrderEditor:
             messagebox.showerror(APP_TITLE, f"파일명 변경 중 오류가 발생했습니다:\n{e}")
             return
 
-        summary = f"완료했습니다. (유지 {total_kept}장"
-        summary += f", 삭제 {total_deleted}장)" if total_deleted else ")"
-        if zip_paths:
-            summary += f"\n원본 zip {len(zip_paths) - len(zip_errors)}개를 휴지통으로 보냈습니다."
-        if delete_errors:
-            summary += "\n\n일부 사진 삭제 실패:\n" + "\n".join(delete_errors)
-        if zip_errors:
-            summary += "\n\n일부 zip 삭제 실패:\n" + "\n".join(zip_errors)
-        messagebox.showinfo(APP_TITLE, summary)
+        # 문제가 없었으면 완료 팝업 없이 곧바로 FastStone(사진편집기)만 뜨게 한다.
+        # 삭제 실패 등 사람이 알아야 할 문제가 있을 때만 경고 팝업을 보여준다.
+        if delete_errors or zip_errors:
+            warning = "일부 작업이 실패했습니다."
+            if delete_errors:
+                warning += "\n\n일부 사진 삭제 실패:\n" + "\n".join(delete_errors)
+            if zip_errors:
+                warning += "\n\n일부 zip 삭제 실패:\n" + "\n".join(zip_errors)
+            messagebox.showwarning(APP_TITLE, warning)
         self.app._open_result_viewer(str(self.output_dir))
         self.win.destroy()
         self.app._on_order_editor_closed()
+        self.app._hide_to_tray_if_active()
 
 
 def main(auto_zip_paths: list | None = None, start_hidden: bool = False):
