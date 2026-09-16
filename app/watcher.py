@@ -73,22 +73,30 @@ def close_alzip_windows_soon() -> None:
 
 
 class FolderWatcher(threading.Thread):
-    """지정된 폴더를 주기적으로 스캔해 새로 생긴 zip 파일을 콜백으로 전달하는 백그라운드 스레드."""
+    """지정된 폴더를 주기적으로 스캔해 새로 생기거나 다시 바뀐 zip 파일을 콜백으로 전달하는
+    백그라운드 스레드.
+
+    파일명이 아니라 "수정시각(mtime)"으로 변화를 판단한다 - 브라우저가 같은 파일명으로 다시
+    다운로드하면(같은 이름으로 덮어쓰기) 파일명만 보고 판단할 경우 "이미 본 파일"로 취급해
+    영원히 무시해버리는 문제가 있었다. mtime 기준으로 보면 덮어써진 시점에 mtime이 갱신되므로
+    "그 이름은 봤지만 그 이후로 내용이 바뀌었다"를 정확히 구분할 수 있다.
+    """
 
     def __init__(self, folder: str, on_new_zip):
         super().__init__(daemon=True)
         self.folder = folder
         self.on_new_zip = on_new_zip
         self._stop_event = threading.Event()
-        self._seen: set[str] = set()
+        self._known_mtimes: dict[str, float] = {}  # 파일명 -> 마지막으로 처리(또는 무시 확정)한 수정시각
 
     def stop(self) -> None:
         self._stop_event.set()
 
     def run(self) -> None:
-        # 감시 시작 시점에 이미 폴더에 있던 zip은 대상에서 제외한다(감시를 켜기 전부터 있던
-        # 파일까지 전부 자동으로 처리되기 시작하면 안 되므로).
-        self._seen = self._list_zip_names()
+        # 감시 시작 시점에 이미 폴더에 있던 zip은 "그 상태 그대로"인 한 대상에서 제외한다
+        # (감시를 켜기 전부터 있던 파일까지 전부 자동으로 처리되기 시작하면 안 되므로).
+        # 이후 같은 이름의 파일이 다시 다운로드되어 mtime이 바뀌면 그때는 새로 처리한다.
+        self._known_mtimes = self._snapshot_mtimes()
         while not self._stop_event.is_set():
             try:
                 self._scan_once()
@@ -96,22 +104,36 @@ class FolderWatcher(threading.Thread):
                 pass
             self._stop_event.wait(POLL_INTERVAL_SEC)
 
-    def _list_zip_names(self) -> set[str]:
+    def _snapshot_mtimes(self) -> dict[str, float]:
+        result: dict[str, float] = {}
         try:
-            return {f for f in os.listdir(self.folder) if f.lower().endswith(".zip")}
+            for f in os.listdir(self.folder):
+                if not f.lower().endswith(".zip"):
+                    continue
+                try:
+                    result[f] = os.path.getmtime(os.path.join(self.folder, f))
+                except OSError:
+                    pass
         except OSError:
-            return set()
+            pass
+        return result
 
     def _scan_once(self) -> None:
-        current = self._list_zip_names()
-        for name in current - self._seen:
+        current = self._snapshot_mtimes()
+        for name, mtime in current.items():
+            known_mtime = self._known_mtimes.get(name)
+            if known_mtime is not None and mtime <= known_mtime:
+                continue  # 이미 처리(또는 무시 확정)한 뒤로 바뀌지 않은 파일
             path = os.path.join(self.folder, name)
             if self._is_stable(path):
-                self._seen.add(name)
+                self._known_mtimes[name] = mtime
                 close_alzip_windows_soon()
                 self.on_new_zip(path)
-            # 크기가 아직 안정되지 않았으면(다운로드 진행 중일 가능성) _seen에 넣지 않고
+            # 크기가 아직 안정되지 않았으면(다운로드 진행 중일 가능성) 기록을 갱신하지 않고
             # 다음 스캔 주기에 다시 확인한다.
+        # 폴더에서 사라진 파일의 기록은 정리한다(메모리 누수 방지).
+        for name in set(self._known_mtimes) - set(current):
+            self._known_mtimes.pop(name, None)
 
     def _is_stable(self, path: str) -> bool:
         try:

@@ -89,7 +89,7 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.1.2.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.3.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
@@ -234,7 +234,7 @@ pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.1.2.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.3.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -243,7 +243,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.2.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.3.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -1015,22 +1015,30 @@ def close_alzip_windows_soon() -> None:
 
 
 class FolderWatcher(threading.Thread):
-    """지정된 폴더를 주기적으로 스캔해 새로 생긴 zip 파일을 콜백으로 전달하는 백그라운드 스레드."""
+    """지정된 폴더를 주기적으로 스캔해 새로 생기거나 다시 바뀐 zip 파일을 콜백으로 전달하는
+    백그라운드 스레드.
+
+    파일명이 아니라 "수정시각(mtime)"으로 변화를 판단한다 - 브라우저가 같은 파일명으로 다시
+    다운로드하면(같은 이름으로 덮어쓰기) 파일명만 보고 판단할 경우 "이미 본 파일"로 취급해
+    영원히 무시해버리는 문제가 있었다. mtime 기준으로 보면 덮어써진 시점에 mtime이 갱신되므로
+    "그 이름은 봤지만 그 이후로 내용이 바뀌었다"를 정확히 구분할 수 있다.
+    """
 
     def __init__(self, folder: str, on_new_zip):
         super().__init__(daemon=True)
         self.folder = folder
         self.on_new_zip = on_new_zip
         self._stop_event = threading.Event()
-        self._seen: set[str] = set()
+        self._known_mtimes: dict[str, float] = {}  # 파일명 -> 마지막으로 처리(또는 무시 확정)한 수정시각
 
     def stop(self) -> None:
         self._stop_event.set()
 
     def run(self) -> None:
-        # 감시 시작 시점에 이미 폴더에 있던 zip은 대상에서 제외한다(감시를 켜기 전부터 있던
-        # 파일까지 전부 자동으로 처리되기 시작하면 안 되므로).
-        self._seen = self._list_zip_names()
+        # 감시 시작 시점에 이미 폴더에 있던 zip은 "그 상태 그대로"인 한 대상에서 제외한다
+        # (감시를 켜기 전부터 있던 파일까지 전부 자동으로 처리되기 시작하면 안 되므로).
+        # 이후 같은 이름의 파일이 다시 다운로드되어 mtime이 바뀌면 그때는 새로 처리한다.
+        self._known_mtimes = self._snapshot_mtimes()
         while not self._stop_event.is_set():
             try:
                 self._scan_once()
@@ -1038,22 +1046,36 @@ class FolderWatcher(threading.Thread):
                 pass
             self._stop_event.wait(POLL_INTERVAL_SEC)
 
-    def _list_zip_names(self) -> set[str]:
+    def _snapshot_mtimes(self) -> dict[str, float]:
+        result: dict[str, float] = {}
         try:
-            return {f for f in os.listdir(self.folder) if f.lower().endswith(".zip")}
+            for f in os.listdir(self.folder):
+                if not f.lower().endswith(".zip"):
+                    continue
+                try:
+                    result[f] = os.path.getmtime(os.path.join(self.folder, f))
+                except OSError:
+                    pass
         except OSError:
-            return set()
+            pass
+        return result
 
     def _scan_once(self) -> None:
-        current = self._list_zip_names()
-        for name in current - self._seen:
+        current = self._snapshot_mtimes()
+        for name, mtime in current.items():
+            known_mtime = self._known_mtimes.get(name)
+            if known_mtime is not None and mtime <= known_mtime:
+                continue  # 이미 처리(또는 무시 확정)한 뒤로 바뀌지 않은 파일
             path = os.path.join(self.folder, name)
             if self._is_stable(path):
-                self._seen.add(name)
+                self._known_mtimes[name] = mtime
                 close_alzip_windows_soon()
                 self.on_new_zip(path)
-            # 크기가 아직 안정되지 않았으면(다운로드 진행 중일 가능성) _seen에 넣지 않고
+            # 크기가 아직 안정되지 않았으면(다운로드 진행 중일 가능성) 기록을 갱신하지 않고
             # 다음 스캔 주기에 다시 확인한다.
+        # 폴더에서 사라진 파일의 기록은 정리한다(메모리 누수 방지).
+        for name in set(self._known_mtimes) - set(current):
+            self._known_mtimes.pop(name, None)
 
     def _is_stable(self, path: str) -> bool:
         try:
@@ -2336,7 +2358,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.2.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.3.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2351,7 +2373,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.2"
+#define MyAppVersion "1.1.3"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2529,7 +2551,7 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.1.2.exe
+installer_output\PhotoDedup_Setup_1.1.3.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
@@ -2676,3 +2698,17 @@ installer_output\PhotoDedup_Setup_1.1.2.exe
   인스턴스에 "창만 보여달라"는 요청이 전달됨(`app/singleinstance.py`). (2) 트레이 아이콘을
   더블클릭 - `app/tray.py`에서 "창 열기" 메뉴 항목을 `default=True`로 지정해서, 트레이 아이콘의
   기본 동작(더블클릭)이 곧바로 창 열기가 되도록 함.
+
+### 9-12. (v1.1.0~v1.1.2에서 발생, v1.1.3에서 수정된 버그) 같은 파일명으로 zip을 다시 다운로드해도 감시가 반응하지 않음
+- **증상**: 감시 폴더에 이미 같은 이름의 zip이 있던 상태에서, 그 이름 그대로 다시
+  다운로드(덮어쓰기)해도 감시가 전혀 반응하지 않음 - 실사용 중 같은 원본 파일을 반복
+  테스트/재다운로드하다가 발견.
+- **원인**: `app/watcher.py`의 `FolderWatcher`가 "이미 본 파일"을 파일명만으로
+  기억(`_seen: set[str]`)했음. 감시가 시작되기 전부터 폴더에 있던 파일은 처음부터
+  `_seen`에 들어가 있으므로, 그 파일이 나중에 같은 이름으로 통째로 덮어써져도(내용은
+  완전히 다른 새 zip인데도) 이름이 같다는 이유만으로 계속 무시됨.
+- **해결**: 파일명 대신 **수정시각(mtime)**을 기억하도록 변경(`_known_mtimes: dict[str, float]`).
+  매 스캔마다 현재 mtime과 마지막으로 기억해 둔 mtime을 비교해서, 마지막에 처리(또는 무시 확정)한
+  이후로 mtime이 갱신됐으면 "바뀐 파일"로 보고 다시 처리한다. 감시 시작 시점에 있던 파일은
+  그 시점의 mtime이 baseline으로 기록되므로 "그 상태 그대로 있는 동안"은 여전히 무시되고,
+  같은 이름으로 다시 다운로드되어 mtime이 갱신되는 순간부터는 정상적으로 감지된다.
