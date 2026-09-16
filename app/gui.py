@@ -252,6 +252,12 @@ class DedupApp:
 
     def _add_zip_paths(self, paths):
         for p in paths:
+            # 경로 구분자를 항상 OS 표준(백슬래시)으로 통일한다 - 예를 들어
+            # filedialog.askdirectory()/드래그앤드롭은 Windows에서도 슬래시(/)가 섞인 경로를
+            # 돌려주는 경우가 있는데, 이런 경로를 나중에 send2trash()에 그대로 넘기면
+            # "지정된 경로를 찾을 수 없습니다" 오류가 나서(파일은 실제로 존재하는데도) zip 삭제가
+            # 실패한다.
+            p = os.path.normpath(p)
             if p not in self.zip_paths:
                 self.zip_paths.append(p)
                 self.file_listbox.insert("end", p)
@@ -288,6 +294,10 @@ class DedupApp:
         if not folder or not os.path.isdir(folder):
             messagebox.showwarning(APP_TITLE, "존재하는 폴더 경로를 입력해주세요.")
             return
+        # "찾아보기..."(filedialog.askdirectory)는 Windows에서도 슬래시(/)가 섞인 경로를 돌려줄
+        # 때가 있다 - 이 경로를 그대로 감시에 쓰면 나중에 send2trash()가 zip 삭제에 실패한다.
+        folder = os.path.normpath(folder)
+        self.watch_folder_var.set(folder)
 
         app_settings.save_settings({"watch_folder": folder, "watch_enabled": True})
         self._start_watch_internal(folder)
@@ -327,8 +337,10 @@ class DedupApp:
     def _maybe_resume_watch(self):
         """이전에 저장해 둔 감시 설정이 켜져 있으면(예: Windows 시작 시 자동 실행) 다시 감시를 시작한다."""
         saved = app_settings.load_settings()
-        if saved["watch_enabled"] and saved["watch_folder"] and os.path.isdir(saved["watch_folder"]):
-            self._start_watch_internal(saved["watch_folder"])
+        # 예전에 슬래시가 섞인 경로로 저장된 적이 있을 수 있으므로 여기서도 한 번 더 정규화한다.
+        folder = os.path.normpath(saved["watch_folder"]) if saved["watch_folder"] else ""
+        if saved["watch_enabled"] and folder and os.path.isdir(folder):
+            self._start_watch_internal(folder)
             self._ensure_tray()
 
     def _on_watcher_new_zip(self, zip_path: str):
@@ -1115,10 +1127,12 @@ class OrderEditor:
                     delete_errors.append(f"{item.output_name}: {e}")
 
             # 4단계: 원본 zip 파일을 휴지통으로 보낸다 (완전 삭제가 아니라 복구 가능하게).
+            # send2trash는 경로에 슬래시(/)가 섞여 있으면(파일은 실제로 존재해도) "지정된 경로를
+            # 찾을 수 없습니다" 오류를 내므로, 넘기기 직전에 한 번 더 정규화해서 방어한다.
             zip_errors = []
             for zp in zip_paths:
                 try:
-                    send2trash(zp)
+                    send2trash(os.path.normpath(zp))
                 except Exception as e:
                     zip_errors.append(f"{Path(zp).name}: {e}")
         except Exception as e:

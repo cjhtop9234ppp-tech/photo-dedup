@@ -84,7 +84,9 @@ class FolderWatcher(threading.Thread):
 
     def __init__(self, folder: str, on_new_zip):
         super().__init__(daemon=True)
-        self.folder = folder
+        # 슬래시(/)가 섞인 경로가 들어오면(예: filedialog가 돌려준 경로) 이 폴더 밑에서 만든
+        # zip 경로도 슬래시가 섞이게 되고, 나중에 send2trash()가 그 경로를 못 찾는 오류를 낸다.
+        self.folder = os.path.normpath(folder)
         self.on_new_zip = on_new_zip
         self._stop_event = threading.Event()
         self._known_mtimes: dict[str, float] = {}  # 파일명 -> 마지막으로 처리(또는 무시 확정)한 수정시각

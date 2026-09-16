@@ -95,6 +95,16 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
     좌표를 반환하는 것으로 확인됨). 메인 창을 아주 잠깐 보통 상태로 되돌렸다가 바로 다시
     숨기는 이 우회책이 그 문제를 해결한다 - 화면에는 메인 창이 보일 틈 없이 순서 정리
     창만 나타난다
+
+17. (v1.1.6부터) `app/gui.py`의 `_add_zip_paths()`(모든 zip 경로가 `self.zip_paths`에
+    들어가는 유일한 통로), `_on_save_watch_settings()`/`_maybe_resume_watch()`(감시 폴더
+    경로), `OrderEditor._confirm()`의 `send2trash()` 호출 직전, `app/watcher.py`의
+    `FolderWatcher.__init__` — 이 네 곳 모두 경로에 `os.path.normpath()`를 적용해야 한다.
+    `filedialog.askdirectory()`(감시 폴더 "찾아보기...")는 Windows에서도 슬래시(`/`)가 섞인
+    경로를 돌려줄 때가 있는데, 이 경로를 그대로 `os.path.join()`에 쓰면 `"C:/Users/..\\file.zip"`
+    처럼 슬래시가 섞인 경로가 만들어지고, `send2trash()`의 Windows 레거시 백엔드가 이런
+    경로에서는 파일이 실제로 있어도 `[Errno 3] 지정된 경로를 찾을 수 없습니다` 오류를 내며
+    zip 삭제에 실패한다(실사용 중 실제 발생 확인). 이 정규화를 하나라도 제거하면 재발한다
 ```
 
 ## 주요 파일

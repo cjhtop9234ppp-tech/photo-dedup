@@ -89,7 +89,7 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.1.5.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.6.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
@@ -234,7 +234,7 @@ pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.1.5.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.6.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -243,7 +243,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.5.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.6.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -1026,7 +1026,9 @@ class FolderWatcher(threading.Thread):
 
     def __init__(self, folder: str, on_new_zip):
         super().__init__(daemon=True)
-        self.folder = folder
+        # 슬래시(/)가 섞인 경로가 들어오면(예: filedialog가 돌려준 경로) 이 폴더 밑에서 만든
+        # zip 경로도 슬래시가 섞이게 되고, 나중에 send2trash()가 그 경로를 못 찾는 오류를 낸다.
+        self.folder = os.path.normpath(folder)
         self.on_new_zip = on_new_zip
         self._stop_event = threading.Event()
         self._known_mtimes: dict[str, float] = {}  # 파일명 -> 마지막으로 처리(또는 무시 확정)한 수정시각
@@ -1442,6 +1444,12 @@ class DedupApp:
 
     def _add_zip_paths(self, paths):
         for p in paths:
+            # 경로 구분자를 항상 OS 표준(백슬래시)으로 통일한다 - 예를 들어
+            # filedialog.askdirectory()/드래그앤드롭은 Windows에서도 슬래시(/)가 섞인 경로를
+            # 돌려주는 경우가 있는데, 이런 경로를 나중에 send2trash()에 그대로 넘기면
+            # "지정된 경로를 찾을 수 없습니다" 오류가 나서(파일은 실제로 존재하는데도) zip 삭제가
+            # 실패한다.
+            p = os.path.normpath(p)
             if p not in self.zip_paths:
                 self.zip_paths.append(p)
                 self.file_listbox.insert("end", p)
@@ -1478,6 +1486,10 @@ class DedupApp:
         if not folder or not os.path.isdir(folder):
             messagebox.showwarning(APP_TITLE, "존재하는 폴더 경로를 입력해주세요.")
             return
+        # "찾아보기..."(filedialog.askdirectory)는 Windows에서도 슬래시(/)가 섞인 경로를 돌려줄
+        # 때가 있다 - 이 경로를 그대로 감시에 쓰면 나중에 send2trash()가 zip 삭제에 실패한다.
+        folder = os.path.normpath(folder)
+        self.watch_folder_var.set(folder)
 
         app_settings.save_settings({"watch_folder": folder, "watch_enabled": True})
         self._start_watch_internal(folder)
@@ -1517,8 +1529,10 @@ class DedupApp:
     def _maybe_resume_watch(self):
         """이전에 저장해 둔 감시 설정이 켜져 있으면(예: Windows 시작 시 자동 실행) 다시 감시를 시작한다."""
         saved = app_settings.load_settings()
-        if saved["watch_enabled"] and saved["watch_folder"] and os.path.isdir(saved["watch_folder"]):
-            self._start_watch_internal(saved["watch_folder"])
+        # 예전에 슬래시가 섞인 경로로 저장된 적이 있을 수 있으므로 여기서도 한 번 더 정규화한다.
+        folder = os.path.normpath(saved["watch_folder"]) if saved["watch_folder"] else ""
+        if saved["watch_enabled"] and folder and os.path.isdir(folder):
+            self._start_watch_internal(folder)
             self._ensure_tray()
 
     def _on_watcher_new_zip(self, zip_path: str):
@@ -2305,10 +2319,12 @@ class OrderEditor:
                     delete_errors.append(f"{item.output_name}: {e}")
 
             # 4단계: 원본 zip 파일을 휴지통으로 보낸다 (완전 삭제가 아니라 복구 가능하게).
+            # send2trash는 경로에 슬래시(/)가 섞여 있으면(파일은 실제로 존재해도) "지정된 경로를
+            # 찾을 수 없습니다" 오류를 내므로, 넘기기 직전에 한 번 더 정규화해서 방어한다.
             zip_errors = []
             for zp in zip_paths:
                 try:
-                    send2trash(zp)
+                    send2trash(os.path.normpath(zp))
                 except Exception as e:
                     zip_errors.append(f"{Path(zp).name}: {e}")
         except Exception as e:
@@ -2381,7 +2397,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.5.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.6.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2396,7 +2412,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.5"
+#define MyAppVersion "1.1.6"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2574,7 +2590,7 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.1.5.exe
+installer_output\PhotoDedup_Setup_1.1.6.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
@@ -2732,6 +2748,30 @@ installer_output\PhotoDedup_Setup_1.1.5.exe
   Windows가 그 창을 최소화 상태로 띄워버려 화면에 전혀 안 보였음 - `_on_edit_order()`에서
   OrderEditor를 만들기 직전/직후로 메인 창을 아주 잠깐 보통 상태로 돌렸다가 다시 숨기는
   방식으로 해결함. 9-13번 트러블슈팅 참고.)
+
+### 9-14. (v1.1.6에서 발견/수정, 실사용 중 실제 발생) 확정 후 zip은 실제로 존재하는데 "지정된 경로를 찾을 수 없습니다"라며 삭제 실패
+- **증상**: "최종 결과폴더로 보내기" 확정 후 `일부 zip 삭제 실패: <파일명>: [Errno 3] 지정된
+  경로를 찾을 수 없습니다: '\\?\C:/Users/MYCOM/Downloads\<파일명>'` 경고 팝업이 뜨고,
+  원본 zip이 `C:\Users\MYCOM\Downloads`에 실제로 있는데도 휴지통으로 이동하지 않음.
+- **원인**: 오류 메시지의 경로를 자세히 보면 `C:/Users/MYCOM/Downloads`(슬래시)와
+  `\<파일명>`(백슬래시)가 섞여 있다. "파일자동읽기 폴더지정"의 "찾아보기..." 버튼은
+  `filedialog.askdirectory()`를 쓰는데, 이 함수는 Windows에서도 슬래시(`/`)가 섞인 경로
+  문자열을 돌려줄 때가 있다. 이 감시 폴더 경로가 그대로 저장되면, 이후
+  `os.path.join(그_경로, 파일명)`으로 zip 경로를 만들 때 폴더 부분의 슬래시는 그대로 남고
+  파일명 앞에만 백슬래시가 붙어 위와 같이 섞인 경로가 만들어진다. `send2trash`의 Windows
+  레거시 백엔드는 이 경로 앞에 `\\?\`(긴 경로 접두사)를 그대로 붙여서
+  `GetShortPathNameW`를 호출하는데, `\\?\` 접두사가 붙은 경로는 Windows가 슬래시를
+  자동으로 백슬래시로 바꿔주지 않기 때문에 파일이 실제로 있어도 "경로를 찾을 수 없음"
+  오류가 난다.
+- **해결**: 경로가 만들어지고 쓰이는 4곳 모두에 `os.path.normpath()`를 추가함 —
+  (1) `app/gui.py`의 `_add_zip_paths()`(모든 zip 경로가 들어오는 유일한 통로),
+  (2) `_on_save_watch_settings()`/`_maybe_resume_watch()`(감시 폴더 경로 저장/로드 시),
+  (3) `OrderEditor._confirm()`에서 `send2trash()` 호출 직전(마지막 방어선),
+  (4) `app/watcher.py`의 `FolderWatcher.__init__()`(감시 폴더 자체를 정규화).
+- **검증**: 슬래시가 섞인 경로를 그대로 재현하는 스크립트로 `_add_zip_paths()`가 경로를
+  정규화하는지, `_confirm()`을 직접 호출했을 때 `send2trash()`가 깨끗한 백슬래시 경로를
+  받고 실제로 파일을 삭제하는지 확인 완료. 이미 실패해서 Downloads에 남아있던 실제 zip
+  파일도 수정된 코드로 휴지통에 정상적으로 보냄.
 
 ### 9-13. (v1.1.5에서 발견/수정) 메인 창이 숨겨진 상태에서 순서 정리 창을 자동으로 열면 그 창이 최소화된 채로 떠서 화면에 안 보임
 - **배경**: v1.1.2에서 "감시 폴더 자동 감지는 조용히 처리"로 바꾸면서 메인 창뿐 아니라 순서
