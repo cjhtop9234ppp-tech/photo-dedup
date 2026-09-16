@@ -53,6 +53,12 @@ zip으로 압축된 사진 묶음에서 **내용이 동일하거나 사실상 �
    함께 등록되고, 트레이 아이콘(`app/tray.py`, pystray)이 떠서 창을 닫아도 감시가 계속된다.
    알집(ALZip)의 "폴더 감시 후 자동 압축풀기" 기능이 함께 켜져 있으면 알집이 띄우는 압축풀기
    진행 창을 자동으로 찾아 닫아준다(`close_alzip_windows_soon`, 창 제목에 "알집"이 포함된 창만).
+   **감시 폴더에서 자동 감지된 처리는 v1.1.2부터 창을 띄우지 않고 조용히(silent) 처리된다** —
+   결과는 `self.result`에 남아있고, 나중에 바탕화면 아이콘이나 트레이 아이콘을 더블클릭해서 창을
+   열면 "결과 폴더 열기"로 확인/확정할 수 있다(트레이 아이콘은 더블클릭이 기본 동작이 되도록
+   `pystray.MenuItem(..., default=True)`로 지정됨). 반면 사람이 탐색기에서 zip을 직접
+   "열기"한 경우(우클릭 등)는 여전히 창이 즉시 나타난다 - 이 둘의 구분은
+   `app/gui.py`의 `run_auto(..., silent=...)` 파라미터로 이루어진다.
 
 ---
 
@@ -83,7 +89,7 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.1.1.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.2.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
@@ -228,7 +234,7 @@ pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.1.1.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.2.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -237,7 +243,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.1.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.2.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -1152,7 +1158,7 @@ def create_tray_icon(on_show, on_quit):
         _make_icon_image(),
         f"{APP_TITLE} (자동감시 중)",
         menu=pystray.Menu(
-            pystray.MenuItem("창 열기", lambda: on_show()),
+            pystray.MenuItem("창 열기", lambda: on_show(), default=True),
             pystray.MenuItem("완전히 종료", lambda: on_quit()),
         ),
     )
@@ -1260,7 +1266,7 @@ class DedupApp:
         # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
         self.folder_watcher: app_watcher.FolderWatcher | None = None
         self.tray_icon = None
-        self._watch_pending: list[str] = []  # 처리 중일 때 들어온 감시 대상 zip 대기열
+        self._watch_pending: list[tuple[str, bool]] = []  # (zip 경로, silent 여부) 대기열
         self._order_editor_open = False
 
         self._build_ui()
@@ -1498,9 +1504,9 @@ class DedupApp:
         self.root.after(0, lambda: self._handle_watched_zip(zip_path))
 
     def _handle_watched_zip(self, zip_path: str):
-        self.root.deiconify()
-        self.root.lift()
-        self._watch_pending.append(zip_path)
+        # 감시 폴더에서 자동으로 감지한 zip은 창을 띄우지 않고 조용히 처리한다(v1.1.2부터).
+        # 결과는 나중에 바탕화면 아이콘이나 트레이 아이콘을 더블클릭해서 창을 열면 확인할 수 있다.
+        self._watch_pending.append((zip_path, True))
         self._drain_watch_queue()
 
     def _drain_watch_queue(self):
@@ -1510,8 +1516,8 @@ class DedupApp:
             return
         if self._order_editor_open:
             return
-        next_zip = self._watch_pending.pop(0)
-        self.run_auto([next_zip])
+        next_zip, silent = self._watch_pending.pop(0)
+        self.run_auto([next_zip], silent=silent)
 
     # ------------------------------------------------------------------
     # 단일 인스턴스: 이미 실행 중일 때 또 실행하려던 요청(zip 열기/창 보여주기) 처리
@@ -1521,11 +1527,13 @@ class DedupApp:
         self.root.after(0, lambda: self._handle_external_request(zip_paths))
 
     def _handle_external_request(self, zip_paths: list[str]):
+        # 사람이 직접 바탕화면 아이콘/트레이 아이콘을 더블클릭했거나 탐색기에서 zip을 열려고 한
+        # 경우이므로, 감시 폴더 자동 감지와 달리 창을 보여준다.
         self.root.deiconify()
         self.root.lift()
         if not zip_paths:
             return
-        self._watch_pending.extend(zip_paths)
+        self._watch_pending.extend((p, False) for p in zip_paths)
         self._drain_watch_queue()
 
     # ------------------------------------------------------------------
@@ -1546,15 +1554,20 @@ class DedupApp:
     # ------------------------------------------------------------------
     # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그 / 감시 폴더 감지)
     # ------------------------------------------------------------------
-    def run_auto(self, zip_paths: list):
+    def run_auto(self, zip_paths: list, silent: bool = False):
         """전달받은 zip으로 파일 선택 → 처리 시작 → 결과 폴더 열기까지 자동으로 진행한다.
 
         "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 하며, 그 전에 사람이 직접
         검수/수정할 수 있도록 순서 정리 창을 열어둔 상태로 자동 진행을 멈춘다.
+
+        silent=True(감시 폴더에서 자동 감지한 경우)면 창/팝업을 전혀 띄우지 않고 조용히
+        처리만 한다 - 순서 정리 창(OrderEditor)도 자동으로 열지 않는다. 처리 결과는
+        `self.result`에 남아있으므로, 나중에 사람이 창을 열어 "결과 폴더 열기"를 누르면
+        그때 순서를 확인하고 확정할 수 있다.
         """
         valid = [p for p in zip_paths if os.path.isfile(p)]
         missing = [p for p in zip_paths if p not in valid]
-        if missing:
+        if missing and not silent:
             messagebox.showwarning(APP_TITLE, "다음 zip 파일을 찾을 수 없습니다:\n" + "\n".join(missing))
         if not valid:
             return
@@ -1562,7 +1575,10 @@ class DedupApp:
         # 목록을 지우고 이번에 전달받은 zip만으로 새로 시작한다(누적되어 옛 zip까지 다시 처리되는 것을 방지).
         self._on_clear_files()
         self._add_zip_paths(valid)
-        self._auto_open_order_editor = True
+        self._auto_open_order_editor = not silent
+        if not silent:
+            self.root.deiconify()
+            self.root.lift()
         self._on_start()
 
     # ------------------------------------------------------------------
@@ -1677,6 +1693,10 @@ class DedupApp:
         if self._auto_open_order_editor:
             self._auto_open_order_editor = False
             self._on_edit_order()
+        else:
+            # silent(감시 폴더 자동 감지) 처리가 끝났거나 사람이 직접 "처리 시작"을 눌러 끝난
+            # 경우 - 대기 중인 다음 감시 대상 zip이 있으면 이어서 처리한다.
+            self._drain_watch_queue()
 
     def _on_process_error(self, message: str):
         self._auto_open_order_editor = False
@@ -2316,7 +2336,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.1.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.2.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2331,7 +2351,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.1.2"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2509,7 +2529,7 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.1.1.exe
+installer_output\PhotoDedup_Setup_1.1.2.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
@@ -2533,6 +2553,12 @@ installer_output\PhotoDedup_Setup_1.1.1.exe
 6. (v1.1.1부터, 중복 실행 방지 검증) 감시가 켜진 채로 프로그램이 떠 있는 상태에서, 같은 zip을
    `PhotoDedup.exe "경로.zip"` 형태로 다시 한 번 실행 → 새 창이 뜨지 않고(프로세스는 곧바로
    종료됨), 기존에 떠 있던 창 하나가 그 zip을 처리하는지 확인 (9-10번 트러블슈팅 참고)
+7. (v1.1.2부터, 조용한 처리 검증) `PhotoDedup.exe --tray`로 감시만 켠 채(창 없음) 감시 폴더에
+   zip을 넣기 → 몇 초 안에 결과 폴더가 바탕화면에 생기지만(`Get-ChildItem`으로 확인) **창은 전혀
+   뜨지 않아야** 한다(`Get-Process PhotoDedup | Select MainWindowTitle`이 비어 있어야 함).
+   이 상태에서 `PhotoDedup.exe`를 인자 없이 다시 실행(바탕화면 아이콘 더블클릭과 동일) →
+   그제서야 창이 나타나고, 방금 조용히 처리된 결과가 "3. 결과"에 그대로 표시되는지 확인.
+   트레이 아이콘을 더블클릭해도 같은 방식으로 창이 열리는지 확인(9-10, 9-11번 참고)
 
 > Git Bash(MSYS)에서 설치 프로그램을 커맨드라인 옵션과 함께 직접 실행해 무음 설치를 테스트하려면
 > `/VERYSILENT` 대신 `//VERYSILENT`(슬래시 두 개)를 써야 합니다. 자세한 이유는 9번 트러블슈팅 참고.
@@ -2636,3 +2662,17 @@ installer_output\PhotoDedup_Setup_1.1.1.exe
   주기로 확인하다가 새 요청을 발견하면 기존 감시 폴더 처리와 동일한 대기열(`_watch_pending`)에
   넣어 순서대로 처리함. 이제 감시가 켜진 상태에서 zip을 몇 번을 다시 열어도 창은 항상 1개만 뜨고,
   그 하나의 창이 요청을 순서대로 처리한다.
+
+### 9-11. (v1.1.2 개선) 다운로드할 때마다 프로그램 창이 튀어나오는 것을 막고, 더블클릭으로만 열리게 함
+- **요청 배경**: 감시 폴더에 zip이 들어올 때마다 창이 자동으로 튀어나오는 게(v1.1.0/v1.1.1 동작)
+  다른 작업 중에 방해가 된다는 실사용 피드백.
+- **변경**: `app/gui.py`의 `run_auto()`에 `silent` 매개변수를 추가. 감시 폴더에서 자동 감지한
+  경우(`_handle_watched_zip`)는 `silent=True`로 호출되어 창을 띄우지 않고(`root.deiconify()`
+  호출 안 함) 순서 정리 창(OrderEditor)도 자동으로 열지 않는다. 처리 결과(`self.result`)는
+  메모리에 남아있으므로, 나중에 창을 열면 "결과 폴더 열기"로 확인/확정할 수 있다. 반대로
+  사람이 직접 zip을 열려고 한 경우(`_handle_external_request`에 zip 경로가 있는 경우, 또는
+  탐색기 우클릭으로 바로 실행된 경우)는 `silent=False`로 창이 즉시 나타난다.
+- **창을 다시 여는 방법 2가지**: (1) 바탕화면/시작메뉴 아이콘을 더블클릭 - 이미 실행 중인
+  인스턴스에 "창만 보여달라"는 요청이 전달됨(`app/singleinstance.py`). (2) 트레이 아이콘을
+  더블클릭 - `app/tray.py`에서 "창 열기" 메뉴 항목을 `default=True`로 지정해서, 트레이 아이콘의
+  기본 동작(더블클릭)이 곧바로 창 열기가 되도록 함.

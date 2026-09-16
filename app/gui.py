@@ -98,7 +98,7 @@ class DedupApp:
         # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
         self.folder_watcher: app_watcher.FolderWatcher | None = None
         self.tray_icon = None
-        self._watch_pending: list[str] = []  # 처리 중일 때 들어온 감시 대상 zip 대기열
+        self._watch_pending: list[tuple[str, bool]] = []  # (zip 경로, silent 여부) 대기열
         self._order_editor_open = False
 
         self._build_ui()
@@ -336,9 +336,9 @@ class DedupApp:
         self.root.after(0, lambda: self._handle_watched_zip(zip_path))
 
     def _handle_watched_zip(self, zip_path: str):
-        self.root.deiconify()
-        self.root.lift()
-        self._watch_pending.append(zip_path)
+        # 감시 폴더에서 자동으로 감지한 zip은 창을 띄우지 않고 조용히 처리한다(v1.1.2부터).
+        # 결과는 나중에 바탕화면 아이콘이나 트레이 아이콘을 더블클릭해서 창을 열면 확인할 수 있다.
+        self._watch_pending.append((zip_path, True))
         self._drain_watch_queue()
 
     def _drain_watch_queue(self):
@@ -348,8 +348,8 @@ class DedupApp:
             return
         if self._order_editor_open:
             return
-        next_zip = self._watch_pending.pop(0)
-        self.run_auto([next_zip])
+        next_zip, silent = self._watch_pending.pop(0)
+        self.run_auto([next_zip], silent=silent)
 
     # ------------------------------------------------------------------
     # 단일 인스턴스: 이미 실행 중일 때 또 실행하려던 요청(zip 열기/창 보여주기) 처리
@@ -359,11 +359,13 @@ class DedupApp:
         self.root.after(0, lambda: self._handle_external_request(zip_paths))
 
     def _handle_external_request(self, zip_paths: list[str]):
+        # 사람이 직접 바탕화면 아이콘/트레이 아이콘을 더블클릭했거나 탐색기에서 zip을 열려고 한
+        # 경우이므로, 감시 폴더 자동 감지와 달리 창을 보여준다.
         self.root.deiconify()
         self.root.lift()
         if not zip_paths:
             return
-        self._watch_pending.extend(zip_paths)
+        self._watch_pending.extend((p, False) for p in zip_paths)
         self._drain_watch_queue()
 
     # ------------------------------------------------------------------
@@ -384,15 +386,20 @@ class DedupApp:
     # ------------------------------------------------------------------
     # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그 / 감시 폴더 감지)
     # ------------------------------------------------------------------
-    def run_auto(self, zip_paths: list):
+    def run_auto(self, zip_paths: list, silent: bool = False):
         """전달받은 zip으로 파일 선택 → 처리 시작 → 결과 폴더 열기까지 자동으로 진행한다.
 
         "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 하며, 그 전에 사람이 직접
         검수/수정할 수 있도록 순서 정리 창을 열어둔 상태로 자동 진행을 멈춘다.
+
+        silent=True(감시 폴더에서 자동 감지한 경우)면 창/팝업을 전혀 띄우지 않고 조용히
+        처리만 한다 - 순서 정리 창(OrderEditor)도 자동으로 열지 않는다. 처리 결과는
+        `self.result`에 남아있으므로, 나중에 사람이 창을 열어 "결과 폴더 열기"를 누르면
+        그때 순서를 확인하고 확정할 수 있다.
         """
         valid = [p for p in zip_paths if os.path.isfile(p)]
         missing = [p for p in zip_paths if p not in valid]
-        if missing:
+        if missing and not silent:
             messagebox.showwarning(APP_TITLE, "다음 zip 파일을 찾을 수 없습니다:\n" + "\n".join(missing))
         if not valid:
             return
@@ -400,7 +407,10 @@ class DedupApp:
         # 목록을 지우고 이번에 전달받은 zip만으로 새로 시작한다(누적되어 옛 zip까지 다시 처리되는 것을 방지).
         self._on_clear_files()
         self._add_zip_paths(valid)
-        self._auto_open_order_editor = True
+        self._auto_open_order_editor = not silent
+        if not silent:
+            self.root.deiconify()
+            self.root.lift()
         self._on_start()
 
     # ------------------------------------------------------------------
@@ -515,6 +525,10 @@ class DedupApp:
         if self._auto_open_order_editor:
             self._auto_open_order_editor = False
             self._on_edit_order()
+        else:
+            # silent(감시 폴더 자동 감지) 처리가 끝났거나 사람이 직접 "처리 시작"을 눌러 끝난
+            # 경우 - 대기 중인 다음 감시 대상 zip이 있으면 이어서 처리한다.
+            self._drain_watch_queue()
 
     def _on_process_error(self, message: str):
         self._auto_open_order_editor = False

@@ -41,7 +41,7 @@ def create_tray_icon(on_show, on_quit):
         _make_icon_image(),
         f"{APP_TITLE} (자동감시 중)",
         menu=pystray.Menu(
-            pystray.MenuItem("창 열기", lambda: on_show()),
+            pystray.MenuItem("창 열기", lambda: on_show(), default=True),
             pystray.MenuItem("완전히 종료", lambda: on_quit()),
         ),
     )
