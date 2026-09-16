@@ -89,7 +89,7 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.1.4.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.5.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
@@ -234,7 +234,7 @@ pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.1.4.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.5.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -243,7 +243,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.4.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.5.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -1592,10 +1592,11 @@ class DedupApp:
         "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 하며, 그 전에 사람이 직접
         검수/수정할 수 있도록 순서 정리 창을 열어둔 상태로 자동 진행을 멈춘다.
 
-        silent=True(감시 폴더에서 자동 감지한 경우)면 창/팝업을 전혀 띄우지 않고 조용히
-        처리만 한다 - 순서 정리 창(OrderEditor)도 자동으로 열지 않는다. 처리 결과는
-        `self.result`에 남아있으므로, 나중에 사람이 창을 열어 "결과 폴더 열기"를 누르면
-        그때 순서를 확인하고 확정할 수 있다.
+        silent=True(감시 폴더에서 자동 감지한 경우)면 메인 창("중복 사진 정리 도구")은 띄우지
+        않고 숨겨둔 채로 처리한다 - 처리가 끝나면 순서 정리 창(OrderEditor)은 평소와 똑같이
+        자동으로 열려서 사람이 바로 검수/확정할 수 있다(메인 창의 자식 창이라도 메인 창이
+        숨겨져 있는 것과 무관하게 정상적으로 화면에 뜬다). 즉 화면에는 "사진 순서 정리" 창만
+        보이고, "중복 사진 정리 도구" 메인 창은 계속 트레이에 숨어있는 상태가 된다.
         """
         valid = [p for p in zip_paths if os.path.isfile(p)]
         missing = [p for p in zip_paths if p not in valid]
@@ -1607,7 +1608,7 @@ class DedupApp:
         # 목록을 지우고 이번에 전달받은 zip만으로 새로 시작한다(누적되어 옛 zip까지 다시 처리되는 것을 방지).
         self._on_clear_files()
         self._add_zip_paths(valid)
-        self._auto_open_order_editor = not silent
+        self._auto_open_order_editor = True  # 순서 정리 창은 silent 여부와 관계없이 항상 자동으로 연다
         if not silent:
             self.root.deiconify()
             self.root.lift()
@@ -1774,7 +1775,16 @@ class DedupApp:
             self._drain_watch_queue()
             return
         self._order_editor_open = True
+        # 메인 창이 트레이로 숨겨진(withdraw) 상태에서 곧바로 새 Toplevel을 최대화로 열면,
+        # Windows가 그 소유 관계 때문에 새 창을 최소화된 상태로 띄워버리는 경우가 있다.
+        # 아주 잠깐 메인 창을 정상 상태로 돌렸다가(순서 정리 창이 뜬 직후 바로) 다시
+        # 숨겨서 이 문제를 피한다 - 화면에는 메인 창이 보일 틈도 없이 순서 정리 창만 나타난다.
+        was_hidden = self.root.state() == "withdrawn"
+        if was_hidden:
+            self.root.deiconify()
         OrderEditor(self, items, source_zip_paths=self.last_zip_paths)
+        if was_hidden:
+            self.root.withdraw()
 
     def _on_order_editor_closed(self):
         self._order_editor_open = False
@@ -1972,6 +1982,8 @@ class OrderEditor:
             self.win.state("zoomed")  # 큰 화면(최대화 상태)으로 열어 편집하기 편하게
         except tk.TclError:
             pass
+        self.win.lift()
+        self.win.focus_force()
 
     def _build_ui(self):
         top = tk.Frame(self.win, padx=10, pady=8)
@@ -2369,7 +2381,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.4.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.5.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2384,7 +2396,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.4"
+#define MyAppVersion "1.1.5"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2562,7 +2574,7 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.1.4.exe
+installer_output\PhotoDedup_Setup_1.1.5.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
@@ -2713,6 +2725,38 @@ installer_output\PhotoDedup_Setup_1.1.4.exe
   FastStone(사진편집기)만 화면에 남고, 메인 창은 트레이 아이콘이 떠 있으면 다시 숨겨진다
   (`OrderEditor._confirm()` 끝에서 `self.app._hide_to_tray_if_active()` 호출). 삭제 실패 등
   예외적인 문제가 있을 때만 경고 팝업이 뜬다. "계속할까요?" 확인 팝업은 그대로 유지된다.
+- **(v1.1.5 추가)** 감시 폴더에서 자동 감지된 처리(`silent=True`)도 **순서 정리 창(OrderEditor)은
+  평소처럼 자동으로 연다** - silent가 숨기는 건 "중복 사진 정리 도구" 메인 창뿐이다. 화면에는
+  "사진 순서 정리" 창만 나타나고, 거기서 확정하면 v1.1.4의 동작대로 FastStone만 남는다.
+  (구현 중 발견한 버그: 메인 창이 완전히 숨겨진 상태에서 곧바로 최대화 Toplevel을 열면
+  Windows가 그 창을 최소화 상태로 띄워버려 화면에 전혀 안 보였음 - `_on_edit_order()`에서
+  OrderEditor를 만들기 직전/직후로 메인 창을 아주 잠깐 보통 상태로 돌렸다가 다시 숨기는
+  방식으로 해결함. 9-13번 트러블슈팅 참고.)
+
+### 9-13. (v1.1.5에서 발견/수정) 메인 창이 숨겨진 상태에서 순서 정리 창을 자동으로 열면 그 창이 최소화된 채로 떠서 화면에 안 보임
+- **배경**: v1.1.2에서 "감시 폴더 자동 감지는 조용히 처리"로 바꾸면서 메인 창뿐 아니라 순서
+  정리 창(OrderEditor)까지 자동으로 열지 않게 했었다. 그런데 실사용 피드백은 "메인 창은 안
+  떠도 되지만, 순서 정리/확정 화면은 자동으로 뜨면 좋겠다"였다(v1.1.5) - 그래서
+  `_auto_open_order_editor`를 항상 True로 바꿔 OrderEditor는 다시 자동으로 열게 했다.
+- **증상**: 그렇게 바꾸고 나니, 메인 창(`app.root`)이 `withdraw()`로 완전히 숨겨진 상태에서
+  새 순서 정리 창(최대화 상태로 여는 `tk.Toplevel`)을 열면, 그 창이 화면 어디에도 보이지
+  않았음. 창 자체는 생성되고 "보임(visible)" 상태였지만 실제로는 **최소화**돼 있었다
+  (`GetWindowRect`가 `-32000,-32000` 같은, Windows가 최소화된 창에만 쓰는 특수 좌표를 반환하는
+  것으로 확인).
+- **원인**: Windows에서, 소유자(owner) 창이 숨겨진(withdrawn) 상태일 때 그 소유자의 자식으로
+  새 최상위 창을 최대화 상태로 열면 창 관리자가 그 자식 창을 최소화된 채로 띄워버리는 경우가
+  있다. tkinter의 `deiconify()`/`update()`/`lift()`/`focus_force()` 조합으로는 이 문제가
+  고쳐지지 않았다(전부 시도했지만 여전히 최소화됨).
+- **해결**: `app/gui.py`의 `_on_edit_order()`에서 `OrderEditor(...)`를 생성하기 **직전에
+  메인 창을 `deiconify()`로 아주 잠깐 보통 상태로 돌렸다가, 생성 직후 다시 `withdraw()`로
+  숨기는** 방식으로 우회함. 이 짧은 순간에는 메인 창의 소유자 상태가 "숨김"이 아니므로
+  Windows가 새 자식 창을 정상적으로(최소화하지 않고) 만든다. 그 뒤 메인 창을 다시 숨겨도 이미
+  만들어진 자식 창의 상태에는 영향이 없다. 사람 눈에는 메인 창이 보일 틈도 없이 순서 정리
+  창만 나타나는 것처럼 보인다.
+- **검증 방법 참고**: 이 버그는 화면을 육안으로 보고 발견한 게 아니라, `GetWindowRect`/`IsIconic`
+  Win32 API로 창의 실제 상태를 조회해서 발견했다 - 스크린샷만으로는 "다른 창에 가려진 것"과
+  "실제로 최소화된 것"을 구분하기 어려우므로, 창이 안 보인다는 문제를 조사할 때는 스크린샷보다
+  `IsIconic`/`GetWindowRect` 조회가 훨씬 정확하다.
 
 ### 9-12b. (개발 환경 참고사항) GUI 버튼을 PowerShell로 자동 클릭해서 검증하려 하면 신뢰할 수 없음
 - **증상**: `SetCursorPos`/`mouse_event`/`SendInput`으로 화면 좌표를 클릭하거나 심지어

@@ -402,10 +402,11 @@ class DedupApp:
         "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 하며, 그 전에 사람이 직접
         검수/수정할 수 있도록 순서 정리 창을 열어둔 상태로 자동 진행을 멈춘다.
 
-        silent=True(감시 폴더에서 자동 감지한 경우)면 창/팝업을 전혀 띄우지 않고 조용히
-        처리만 한다 - 순서 정리 창(OrderEditor)도 자동으로 열지 않는다. 처리 결과는
-        `self.result`에 남아있으므로, 나중에 사람이 창을 열어 "결과 폴더 열기"를 누르면
-        그때 순서를 확인하고 확정할 수 있다.
+        silent=True(감시 폴더에서 자동 감지한 경우)면 메인 창("중복 사진 정리 도구")은 띄우지
+        않고 숨겨둔 채로 처리한다 - 처리가 끝나면 순서 정리 창(OrderEditor)은 평소와 똑같이
+        자동으로 열려서 사람이 바로 검수/확정할 수 있다(메인 창의 자식 창이라도 메인 창이
+        숨겨져 있는 것과 무관하게 정상적으로 화면에 뜬다). 즉 화면에는 "사진 순서 정리" 창만
+        보이고, "중복 사진 정리 도구" 메인 창은 계속 트레이에 숨어있는 상태가 된다.
         """
         valid = [p for p in zip_paths if os.path.isfile(p)]
         missing = [p for p in zip_paths if p not in valid]
@@ -417,7 +418,7 @@ class DedupApp:
         # 목록을 지우고 이번에 전달받은 zip만으로 새로 시작한다(누적되어 옛 zip까지 다시 처리되는 것을 방지).
         self._on_clear_files()
         self._add_zip_paths(valid)
-        self._auto_open_order_editor = not silent
+        self._auto_open_order_editor = True  # 순서 정리 창은 silent 여부와 관계없이 항상 자동으로 연다
         if not silent:
             self.root.deiconify()
             self.root.lift()
@@ -584,7 +585,16 @@ class DedupApp:
             self._drain_watch_queue()
             return
         self._order_editor_open = True
+        # 메인 창이 트레이로 숨겨진(withdraw) 상태에서 곧바로 새 Toplevel을 최대화로 열면,
+        # Windows가 그 소유 관계 때문에 새 창을 최소화된 상태로 띄워버리는 경우가 있다.
+        # 아주 잠깐 메인 창을 정상 상태로 돌렸다가(순서 정리 창이 뜬 직후 바로) 다시
+        # 숨겨서 이 문제를 피한다 - 화면에는 메인 창이 보일 틈도 없이 순서 정리 창만 나타난다.
+        was_hidden = self.root.state() == "withdrawn"
+        if was_hidden:
+            self.root.deiconify()
         OrderEditor(self, items, source_zip_paths=self.last_zip_paths)
+        if was_hidden:
+            self.root.withdraw()
 
     def _on_order_editor_closed(self):
         self._order_editor_open = False
@@ -782,6 +792,8 @@ class OrderEditor:
             self.win.state("zoomed")  # 큰 화면(최대화 상태)으로 열어 편집하기 편하게
         except tk.TclError:
             pass
+        self.win.lift()
+        self.win.focus_force()
 
     def _build_ui(self):
         top = tk.Frame(self.win, padx=10, pady=8)

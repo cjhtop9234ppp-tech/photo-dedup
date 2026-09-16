@@ -81,6 +81,20 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
     단, 사진/zip 삭제가 일부 실패한 경우의 경고 팝업(`messagebox.showwarning`)은 그대로 유지할
     것 - 이건 사람이 반드시 알아야 하는 예외 상황이다. "확정 전 계속할까요?" 확인 팝업
     (`messagebox.askyesno`)도 그대로 유지할 것 - 파일명 변경/zip 삭제 전 마지막 안전장치다
+
+15. (v1.1.5부터) `run_auto(..., silent=True)`(감시 폴더 자동 감지)여도 `_auto_open_order_editor`는
+    항상 True로 유지해서 순서 정리 창(OrderEditor)은 자동으로 연다 — silent가 숨기는 대상은
+    "중복 사진 정리 도구" 메인 창(`root.deiconify()`를 건너뜀)뿐이다. 이 둘을 다시 하나로
+    묶어서(silent=True일 때 OrderEditor까지 숨기는 방향으로) 되돌리지 말 것
+
+16. (v1.1.5부터) `_on_edit_order()`에서 OrderEditor를 생성하기 직전/직후로
+    `root.deiconify()` / `root.withdraw()`를 감싸는 코드(`was_hidden` 처리)를 지우지 말 것 —
+    메인 창이 완전히 숨겨진(withdrawn) 상태에서 곧바로 최대화 Toplevel(OrderEditor)을 열면
+    Windows가 그 창을 (owner가 숨겨져 있다는 이유로) **최소화된 상태로** 띄워버려서 화면에
+    전혀 안 보이는 실제 버그가 있었다(`GetWindowRect`가 `-32000,-32000` 같은 최소화 전용
+    좌표를 반환하는 것으로 확인됨). 메인 창을 아주 잠깐 보통 상태로 되돌렸다가 바로 다시
+    숨기는 이 우회책이 그 문제를 해결한다 - 화면에는 메인 창이 보일 틈 없이 순서 정리
+    창만 나타난다
 ```
 
 ## 주요 파일
