@@ -56,6 +56,12 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
 
 10. app/startup.py는 HKCU(현재 사용자)의 Run 키에만 값을 쓴다 — HKLM(시스템 전체)로
     바꾸면 관리자 권한이 필요해지고 다른 계정에도 영향을 주게 되므로 바꾸지 말 것
+
+11. (v1.1.1부터) main.py의 `_launch_gui()`는 GUI를 띄우기 전에 반드시
+    `app/singleinstance.py`의 `try_acquire()`로 "이미 실행 중인 인스턴스가 있는지"를 먼저
+    확인한다 — 이 확인을 건너뛰면, 감시가 켜진 채로 트레이에 프로그램이 떠 있는 상태에서
+    zip을 또 열었을 때 창이 2개 뜨고 두 프로세스가 같은 결과 폴더에 동시에 쓰려다 부딪히는
+    버그(v1.1.0에서 실제 발생)가 재발한다
 ```
 
 ## 주요 파일
@@ -66,6 +72,7 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
 | `app/core.py` | 핵심 로직 (`process_zips()`가 전체 진입점) |
 | `app/gui.py` | GUI 전체 (`DedupApp`, `OrderEditor`) |
 | `app/cli.py` | CLI |
+| `app/singleinstance.py` | 중복 실행 방지 (Windows 명명된 뮤텍스) + 이미 실행 중인 인스턴스로 zip 열기 요청 전달 |
 | `app/settings.py` | "파일자동읽기 폴더지정" 설정 저장/불러오기 (`%APPDATA%\PhotoDedup\config.json`) |
 | `app/watcher.py` | 감시 폴더 폴링(`FolderWatcher`) + 알집 창 자동 닫기(`close_alzip_windows`) |
 | `app/startup.py` | Windows 로그인 시 자동 실행 등록/해제 (`HKCU\...\Run`) |

@@ -27,6 +27,7 @@ from send2trash import send2trash
 
 from . import core
 from . import settings as app_settings
+from . import singleinstance as app_singleinstance
 from . import startup as app_startup
 from . import tray as app_tray
 from . import watcher as app_watcher
@@ -82,8 +83,8 @@ class DedupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x760")
-        self.root.minsize(680, 660)
+        self.root.geometry("760x920")
+        self.root.minsize(700, 860)
 
         self.zip_paths: list[str] = []
         self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
@@ -103,6 +104,11 @@ class DedupApp:
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._maybe_resume_watch()
+
+        # 이 프로세스가 유일한 인스턴스이므로(main.py에서 이미 확인됨), 나중에 또 실행하려다
+        # 넘겨받는 요청(zip 열기/창 보여주기)이 있는지 계속 확인한다.
+        self.pending_request_watcher = app_singleinstance.PendingRequestWatcher(self._on_external_request)
+        self.pending_request_watcher.start()
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -344,6 +350,21 @@ class DedupApp:
             return
         next_zip = self._watch_pending.pop(0)
         self.run_auto([next_zip])
+
+    # ------------------------------------------------------------------
+    # 단일 인스턴스: 이미 실행 중일 때 또 실행하려던 요청(zip 열기/창 보여주기) 처리
+    # ------------------------------------------------------------------
+    def _on_external_request(self, zip_paths: list[str]):
+        # 이 콜백은 감시 스레드에서 호출되므로, tkinter 위젯 조작은 반드시 메인 스레드로 넘긴다.
+        self.root.after(0, lambda: self._handle_external_request(zip_paths))
+
+    def _handle_external_request(self, zip_paths: list[str]):
+        self.root.deiconify()
+        self.root.lift()
+        if not zip_paths:
+            return
+        self._watch_pending.extend(zip_paths)
+        self._drain_watch_queue()
 
     # ------------------------------------------------------------------
     # 트레이 아이콘 / 종료 (감시가 켜져 있는 동안 창을 닫아도 계속 감시하기 위함)
@@ -655,6 +676,8 @@ class DedupApp:
 
     def _shutdown(self):
         self._stop_watch_internal()
+        if self.pending_request_watcher is not None:
+            self.pending_request_watcher.stop()
         if self.tray_icon is not None:
             try:
                 self.tray_icon.stop()

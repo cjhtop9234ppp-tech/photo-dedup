@@ -64,6 +64,7 @@ PhotoDedup/
 │   ├── __init__.py          # 빈 파일 (app을 패키지로 만들기 위함)
 │   ├── core.py               # 핵심 로직: 압축해제, sha256+pHash 이중 판별, 그룹핑, 바탕화면 결과폴더 생성
 │   ├── cli.py                 # 콘솔(CLI) 버전 진입점
+│   ├── singleinstance.py       # 중복 실행 방지(명명된 뮤텍스) + 이미 떠 있는 인스턴스로 zip 열기 요청 전달
 │   ├── settings.py             # "파일자동읽기 폴더지정" 설정 저장/불러오기 (%APPDATA%\PhotoDedup\config.json)
 │   ├── watcher.py               # 감시 폴더 폴링(FolderWatcher) + 알집 창 자동 닫기
 │   ├── startup.py                 # Windows 로그인 시 자동 실행 등록/해제 (HKCU\...\Run)
@@ -82,7 +83,7 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.1.0.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.1.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
@@ -92,6 +93,7 @@ PhotoDedup/
 | `app/__init__.py` | `app` 디렉터리를 파이썬 패키지로 인식시키는 빈 파일 |
 | `app/core.py` | zip 압축 해제, SHA-256+pHash 이중 판별, Union-Find/BK-tree 그룹핑, 바탕화면 결과 폴더 생성 등 GUI/CLI 공용 핵심 로직 |
 | `app/cli.py` | 콘솔에서 `python -m app.cli photos.zip` 형태로 실행하는 CLI. 개발 중 핵심 로직을 빠르게 검증하는 용도 |
+| `app/singleinstance.py` | Windows 명명된 뮤텍스로 중복 실행을 막고, 이미 실행 중이면 zip 경로를 그 인스턴스에 파일로 전달 |
 | `app/settings.py` | "파일자동읽기 폴더지정" 설정(감시 폴더 경로/켜짐 여부)을 `%APPDATA%\PhotoDedup\config.json`에 저장/불러오기 |
 | `app/watcher.py` | 지정 폴더를 폴링해 새 zip을 감지하는 `FolderWatcher`, 알집 창을 자동으로 닫는 `close_alzip_windows_soon` |
 | `app/startup.py` | Windows 로그인 시 자동 실행 등록/해제 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) |
@@ -226,7 +228,7 @@ pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.1.0.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.1.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -235,7 +237,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.0.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.1.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -260,6 +262,11 @@ build.bat
   모드. 창을 띄우지 않고 트레이 아이콘 + 폴더 감시만 시작한다(GUI에서 감시를 켤 때 이 옵션과
   함께 자기 자신을 Windows 시작프로그램으로 등록한다).
 - "-"로 시작하는 다른 옵션과 함께 실행: 콘솔(CLI) 모드 (예: main.exe photos.zip --threshold 8)
+
+GUI를 띄우는 모든 경우(인자 없음 / zip 경로 / --tray)는 먼저 "이미 실행 중인 인스턴스가 있는지"를
+확인한다. 이미 떠 있다면 새 창을 또 띄우지 않고, 넘겨받은 zip이 있으면 그 인스턴스에 처리를
+요청만 하고 조용히 끝난다 - 감시가 켜진 채로 프로그램이 트레이에 떠 있는 상태에서 zip을 또 열었을
+때 창이 2개 뜨고 서로 같은 결과 폴더에 동시에 쓰려다 부딪히는 문제를 막기 위함이다.
 """
 import sys
 
@@ -270,21 +277,28 @@ def main():
     if args and not args[0].startswith("-"):
         zip_paths = [a for a in args if a.lower().endswith(".zip")]
         if zip_paths:
-            from app.gui import main as gui_main
-            gui_main(auto_zip_paths=zip_paths)
+            _launch_gui(zip_paths=zip_paths)
             return
 
     if args and args[0] == "--tray":
-        from app.gui import main as gui_main
-        gui_main(start_hidden=True)
+        _launch_gui(start_hidden=True)
         return
 
     if args:
         from app.cli import main as cli_main
         sys.exit(cli_main(args))
     else:
-        from app.gui import main as gui_main
-        gui_main()
+        _launch_gui()
+
+
+def _launch_gui(zip_paths=None, start_hidden=False):
+    from app import singleinstance
+    if not singleinstance.try_acquire():
+        # 이미 다른 인스턴스가 실행 중이다 - 새 창을 띄우지 않고 그 인스턴스에 요청만 넘긴다.
+        singleinstance.request_open_in_running_instance(zip_paths or [])
+        return
+    from app.gui import main as gui_main
+    gui_main(auto_zip_paths=zip_paths, start_hidden=start_hidden)
 
 
 if __name__ == "__main__":
@@ -768,6 +782,115 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
+### `app/singleinstance.py`
+```python
+"""
+프로그램이 이미 실행 중일 때, 창을 하나 더 띄우는 대신 이미 떠 있는 창에 요청만 넘겨준다.
+
+배경: "파일자동읽기 폴더지정"으로 감시를 켜두면 트레이에 프로그램이 계속 떠 있는 상태가 되는데,
+이 상태에서 사람이 zip 파일을 탐색기에서 다시 열거나(우클릭 "열기"), 프로그램을 한 번 더
+실행하면 완전히 별개인 두 번째 프로세스가 새로 생겨서 - 창이 2개 뜨고, 각자 독립적으로 같은
+zip을 처리하려다 서로 부딪히는(같은 결과 폴더에 동시에 쓰기 등) 문제가 있었다. Windows 명명된
+뮤텍스(Mutex)로 "이미 실행 중인 인스턴스가 있는지"를 확인해서 이 문제를 막는다.
+"""
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import threading
+from ctypes import wintypes
+
+from . import settings as app_settings
+
+POLL_INTERVAL_SEC = 1.5
+
+_MUTEX_NAME = "PhotoDedup_SingleInstance_Mutex"
+_ERROR_ALREADY_EXISTS = 183
+_PENDING_FILE = app_settings.CONFIG_DIR / "pending_zips.json"
+
+_mutex_handle = None  # 뮤텍스를 계속 들고 있어야(참조 유지) 프로세스가 끝날 때까지 살아있다
+
+
+def try_acquire() -> bool:
+    """이 프로세스가 유일한 실행 중 인스턴스가 될 수 있으면 True, 이미 다른 인스턴스가 있으면 False."""
+    global _mutex_handle
+    if os.name != "nt":
+        return True
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.GetLastError.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    already_running = kernel32.GetLastError() == _ERROR_ALREADY_EXISTS
+    if already_running:
+        if handle:
+            kernel32.CloseHandle(handle)
+        return False
+
+    _mutex_handle = handle  # GC/해제 방지용으로 계속 들고 있는다
+    return True
+
+
+def request_open_in_running_instance(zip_paths: list[str]) -> None:
+    """이미 다른 인스턴스가 실행 중일 때, 그 인스턴스에게 이 zip들을 대신 열어달라고(또는 창만
+    앞으로 가져와 달라고) 요청한다. zip_paths가 비어 있어도(단순 재실행) 창을 띄워달라는 뜻이다."""
+    app_settings.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    existing: list[str] = []
+    if _PENDING_FILE.is_file():
+        try:
+            existing = json.loads(_PENDING_FILE.read_text(encoding="utf-8"))
+            if not isinstance(existing, list):
+                existing = []
+        except Exception:
+            existing = []
+    existing.extend(zip_paths)
+    _PENDING_FILE.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+
+
+def take_pending_requests() -> list[str]:
+    """대기 중인 요청(zip 경로 목록, 비어 있을 수도 있음)을 읽고 파일을 지운다.
+
+    실행 중인 인스턴스가 주기적으로 호출해서 새로 들어온 요청이 있는지 확인하는 용도.
+    반환값이 빈 리스트여도 파일 자체가 있었다면 "창을 열어달라"는 요청으로 취급해야 한다.
+    이 함수는 파일이 있었는지 여부를 (had_request, zip_paths) 형태로 알려준다.
+    """
+    if not _PENDING_FILE.is_file():
+        return None
+    try:
+        data = json.loads(_PENDING_FILE.read_text(encoding="utf-8"))
+        paths = [p for p in data if isinstance(p, str)] if isinstance(data, list) else []
+    except Exception:
+        paths = []
+    try:
+        _PENDING_FILE.unlink()
+    except OSError:
+        pass
+    return paths
+
+
+class PendingRequestWatcher(threading.Thread):
+    """실행 중인(유일한) 인스턴스에서, 나중에 또 실행하려다 넘겨받은 요청이 있는지 주기적으로 확인한다."""
+
+    def __init__(self, on_request):
+        super().__init__(daemon=True)
+        self.on_request = on_request  # on_request(zip_paths: list[str]) - 빈 리스트면 "창만 보여줘" 요청
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            paths = take_pending_requests()
+            if paths is not None:
+                self.on_request(paths)
+            self._stop_event.wait(POLL_INTERVAL_SEC)
+```
+
 ### `app/settings.py`
 ```python
 """
@@ -1066,6 +1189,7 @@ from send2trash import send2trash
 
 from . import core
 from . import settings as app_settings
+from . import singleinstance as app_singleinstance
 from . import startup as app_startup
 from . import tray as app_tray
 from . import watcher as app_watcher
@@ -1121,8 +1245,8 @@ class DedupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x760")
-        self.root.minsize(680, 660)
+        self.root.geometry("760x920")
+        self.root.minsize(700, 860)
 
         self.zip_paths: list[str] = []
         self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
@@ -1142,6 +1266,11 @@ class DedupApp:
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._maybe_resume_watch()
+
+        # 이 프로세스가 유일한 인스턴스이므로(main.py에서 이미 확인됨), 나중에 또 실행하려다
+        # 넘겨받는 요청(zip 열기/창 보여주기)이 있는지 계속 확인한다.
+        self.pending_request_watcher = app_singleinstance.PendingRequestWatcher(self._on_external_request)
+        self.pending_request_watcher.start()
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -1383,6 +1512,21 @@ class DedupApp:
             return
         next_zip = self._watch_pending.pop(0)
         self.run_auto([next_zip])
+
+    # ------------------------------------------------------------------
+    # 단일 인스턴스: 이미 실행 중일 때 또 실행하려던 요청(zip 열기/창 보여주기) 처리
+    # ------------------------------------------------------------------
+    def _on_external_request(self, zip_paths: list[str]):
+        # 이 콜백은 감시 스레드에서 호출되므로, tkinter 위젯 조작은 반드시 메인 스레드로 넘긴다.
+        self.root.after(0, lambda: self._handle_external_request(zip_paths))
+
+    def _handle_external_request(self, zip_paths: list[str]):
+        self.root.deiconify()
+        self.root.lift()
+        if not zip_paths:
+            return
+        self._watch_pending.extend(zip_paths)
+        self._drain_watch_queue()
 
     # ------------------------------------------------------------------
     # 트레이 아이콘 / 종료 (감시가 켜져 있는 동안 창을 닫아도 계속 감시하기 위함)
@@ -1694,6 +1838,8 @@ class DedupApp:
 
     def _shutdown(self):
         self._stop_watch_internal()
+        if self.pending_request_watcher is not None:
+            self.pending_request_watcher.stop()
         if self.tray_icon is not None:
             try:
                 self.tray_icon.stop()
@@ -2170,7 +2316,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.0.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.1.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2185,7 +2331,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2363,7 +2509,7 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.1.0.exe
+installer_output\PhotoDedup_Setup_1.1.1.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
@@ -2384,6 +2530,9 @@ installer_output\PhotoDedup_Setup_1.1.0.exe
    (`Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`)
 5. GUI에서 "감시 끄기" 클릭 → 위 Run 값이 삭제되고, 폴더에 새 zip을 넣어도 더는 자동 실행되지
    않는지 확인
+6. (v1.1.1부터, 중복 실행 방지 검증) 감시가 켜진 채로 프로그램이 떠 있는 상태에서, 같은 zip을
+   `PhotoDedup.exe "경로.zip"` 형태로 다시 한 번 실행 → 새 창이 뜨지 않고(프로세스는 곧바로
+   종료됨), 기존에 떠 있던 창 하나가 그 zip을 처리하는지 확인 (9-10번 트러블슈팅 참고)
 
 > Git Bash(MSYS)에서 설치 프로그램을 커맨드라인 옵션과 함께 직접 실행해 무음 설치를 테스트하려면
 > `/VERYSILENT` 대신 `//VERYSILENT`(슬래시 두 개)를 써야 합니다. 자세한 이유는 9번 트러블슈팅 참고.
@@ -2468,3 +2617,22 @@ installer_output\PhotoDedup_Setup_1.1.0.exe
   `result.output_dir`이 빈 문자열이면 "처리 가능한 사진이 없어 결과 폴더를 생성하지 않았습니다."라고만
   안내하고, "결과 폴더 열기" 버튼도 비활성화되도록 수정함. 이제 zip이 아닌 파일을 넣으면 바탕화면에
   **아무 흔적도 남지 않음** (폴더도, 파일도 생성 안 됨).
+
+### 9-10. (v1.1.0에서 발생, v1.1.1에서 수정된 버그) "파일자동읽기 폴더지정" 감시 중에 zip을 또 열면 창이 2개 뜨고 처리가 꼬임
+- **증상**: 감시를 켜서(트레이 상주) 프로그램이 백그라운드에서 이미 떠 있는 상태에서, 감시 폴더 안의
+  zip 파일을 사람이 다시 열면(탐색기 우클릭 "중복 사진 정리 도구로 열기" 등) 완전히 똑같은 창이
+  2개 뜨고, 실제로는 둘 다 제대로 처리되지 않는 것처럼 보임(실사용 중 실제로 발생 확인).
+- **원인**: 프로그램에 "이미 실행 중인지" 확인하는 장치가 전혀 없었음. `app/gui.py`의
+  `DedupApp.__init__()`은 실행될 때마다 무조건 `_maybe_resume_watch()`로 저장된 감시 설정을 다시
+  불러와 **자기 자신의 독립적인 `FolderWatcher`를 새로 시작**했음. 그 결과 감시 중인 프로세스가 이미
+  떠 있는데 사람이 zip을 또 열면, 그 zip을 처리하려는 새 프로세스가 하나 더 생기고 그 프로세스도
+  똑같이 감시를 재개해서 - 두 프로세스가 각자 독립적으로 같은 대상을 처리하려다 같은 결과 폴더에
+  동시에 쓰기 작업을 하며 부딪힘.
+- **해결**: `app/singleinstance.py`를 새로 추가. Windows 명명된 뮤텍스(`CreateMutexW`)로 "이미 이
+  이름의 뮤텍스를 가진 프로세스가 있는지"를 확인해서, 이미 있으면(`GetLastError() ==
+  ERROR_ALREADY_EXISTS`) 새 프로세스는 GUI를 아예 띄우지 않고 넘겨받은 zip 경로들을
+  `%APPDATA%\PhotoDedup\pending_zips.json`에 적어두기만 하고 즉시 종료함(`main.py`의
+  `_launch_gui()`). 이미 떠 있던(유일한) 인스턴스는 `PendingRequestWatcher`로 이 파일을 1.5초
+  주기로 확인하다가 새 요청을 발견하면 기존 감시 폴더 처리와 동일한 대기열(`_watch_pending`)에
+  넣어 순서대로 처리함. 이제 감시가 켜진 상태에서 zip을 몇 번을 다시 열어도 창은 항상 1개만 뜨고,
+  그 하나의 창이 요청을 순서대로 처리한다.
