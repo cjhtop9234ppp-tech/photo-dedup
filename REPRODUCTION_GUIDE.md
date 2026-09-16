@@ -23,6 +23,8 @@ zip으로 압축된 사진 묶음에서 **내용이 동일하거나 사실상 �
 | 이미지 처리 | `Pillow` | 이미지 열기/썸네일/EXIF 처리 |
 | 중복 판별 | `hashlib`(표준 라이브러리, SHA-256) + `imagehash`(pHash) | 정확 일치 + 유사 일치 이중 판별 |
 | 휴지통 이동 | `Send2Trash` | 원본 zip을 완전삭제 대신 복구 가능하게 삭제 |
+| 폴더 자동 감시 | `ctypes`(표준 라이브러리, 폴링) | 외부 라이브러리 없이 감시 폴더의 새 zip을 주기적으로 스캔 |
+| 시스템 트레이 | `pystray` | 감시가 켜져 있는 동안 창을 닫아도 계속 감시하도록 트레이 아이콘 상주 |
 | 패키징 | `PyInstaller` (onefile) | 단일 실행파일(.exe) 생성 |
 | 설치 프로그램 | Inno Setup 6 (ISCC.exe) | Program Files 설치 + 시작메뉴/바탕화면 바로가기 + 제거 프로그램 + zip 우클릭 컨텍스트 메뉴 |
 | 외부 연동(선택) | FastStone Image Viewer | 설치돼 있으면 결과 폴더를 이 뷰어로 자동 오픈, 없으면 탐색기로 대체 |
@@ -44,6 +46,13 @@ zip으로 압축된 사진 묶음에서 **내용이 동일하거나 사실상 �
    - "최종 결과폴더로 보내기" 확정 시에만: 화면 순서대로 파일명에 순번(`001_`, `002_`…) 부여, 제외 표시한 사진 완전 삭제, **원본 zip을 휴지통으로 이동**, 결과 폴더를 **FastStone Image Viewer로 자동 오픈**(없으면 탐색기)
 7. **자동 실행**: 탐색기에서 zip 파일을 우클릭 → "중복 사진 정리 도구로 열기"를 선택하면 파일 목록 채우기 → 처리 시작 → 결과 폴더 열기(순서 정리 화면)까지 자동으로 진행됨. 다만 "최종 결과폴더로 보내기"만은 사람이 직접 눌러야 함(파일명 변경 + zip 삭제가 일어나는 단계라 의도적으로 자동화하지 않음).
 8. **예외 처리**: 이미지가 아닌 파일 무시, 손상된 이미지는 "읽기 실패" 목록으로 안내, 암호 걸린/손상된 zip은 오류 메시지로 안내.
+9. **파일자동읽기 폴더지정** (v1.1.0부터): GUI에서 감시할 폴더(기본값: 다운로드 폴더)를 지정하고
+   저장하면, 그 폴더에 새 zip 파일이 들어올 때마다 자동으로 7번 자동 실행 흐름이 시작된다
+   (`app/watcher.py`의 `FolderWatcher`가 폴링 방식으로 감지, 파일 크기가 잠깐 변하지 않을 때만
+   "다운로드 완료"로 판단). 저장 시 Windows 로그인 시 자동 실행(`app/startup.py`, `HKCU\...\Run`)도
+   함께 등록되고, 트레이 아이콘(`app/tray.py`, pystray)이 떠서 창을 닫아도 감시가 계속된다.
+   알집(ALZip)의 "폴더 감시 후 자동 압축풀기" 기능이 함께 켜져 있으면 알집이 띄우는 압축풀기
+   진행 창을 자동으로 찾아 닫아준다(`close_alzip_windows_soon`, 창 제목에 "알집"이 포함된 창만).
 
 ---
 
@@ -55,8 +64,12 @@ PhotoDedup/
 │   ├── __init__.py          # 빈 파일 (app을 패키지로 만들기 위함)
 │   ├── core.py               # 핵심 로직: 압축해제, sha256+pHash 이중 판별, 그룹핑, 바탕화면 결과폴더 생성
 │   ├── cli.py                 # 콘솔(CLI) 버전 진입점
-│   └── gui.py                  # GUI 버전 (tkinter + tkinterdnd2), 사진 순서 편집 창(OrderEditor) 포함
-├── main.py                     # 프로그램 진입점 (인자 없으면 GUI, zip 경로면 자동실행 GUI, 그 외 옵션은 CLI)
+│   ├── settings.py             # "파일자동읽기 폴더지정" 설정 저장/불러오기 (%APPDATA%\PhotoDedup\config.json)
+│   ├── watcher.py               # 감시 폴더 폴링(FolderWatcher) + 알집 창 자동 닫기
+│   ├── startup.py                 # Windows 로그인 시 자동 실행 등록/해제 (HKCU\...\Run)
+│   ├── tray.py                     # 시스템 트레이 아이콘 (pystray)
+│   └── gui.py                       # GUI 버전 (tkinter + tkinterdnd2), 사진 순서 편집 창(OrderEditor) 포함
+├── main.py                     # 프로그램 진입점 (인자 없으면 GUI, zip 경로면 자동실행 GUI, --tray는 트레이 감시, 그 외 옵션은 CLI)
 ├── requirements.txt             # Python 의존성 목록
 ├── build.bat                     # PyInstaller exe 빌드 + (있으면) Inno Setup 설치 프로그램 빌드 스크립트
 ├── installer.iss                  # Inno Setup 설치 프로그램 스크립트
@@ -69,16 +82,20 @@ PhotoDedup/
 ├── dist/
 │   └── PhotoDedup.exe                # (빌드 시 생성) 배포용 단일 실행파일
 └── installer_output/
-    └── PhotoDedup_Setup_1.0.0.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
+    └── PhotoDedup_Setup_1.1.0.exe     # (빌드 시 생성) Inno Setup 설치 프로그램
 ```
 
 ### 핵심 파일 역할 한 줄 설명
 | 파일 | 역할 |
 |---|---|
-| `main.py` | 실행 진입점. 인자 형태를 보고 GUI/자동실행 GUI/CLI 중 무엇을 실행할지 결정 |
+| `main.py` | 실행 진입점. 인자 형태를 보고 GUI/자동실행 GUI/트레이 감시(`--tray`)/CLI 중 무엇을 실행할지 결정 |
 | `app/__init__.py` | `app` 디렉터리를 파이썬 패키지로 인식시키는 빈 파일 |
 | `app/core.py` | zip 압축 해제, SHA-256+pHash 이중 판별, Union-Find/BK-tree 그룹핑, 바탕화면 결과 폴더 생성 등 GUI/CLI 공용 핵심 로직 |
 | `app/cli.py` | 콘솔에서 `python -m app.cli photos.zip` 형태로 실행하는 CLI. 개발 중 핵심 로직을 빠르게 검증하는 용도 |
+| `app/settings.py` | "파일자동읽기 폴더지정" 설정(감시 폴더 경로/켜짐 여부)을 `%APPDATA%\PhotoDedup\config.json`에 저장/불러오기 |
+| `app/watcher.py` | 지정 폴더를 폴링해 새 zip을 감지하는 `FolderWatcher`, 알집 창을 자동으로 닫는 `close_alzip_windows_soon` |
+| `app/startup.py` | Windows 로그인 시 자동 실행 등록/해제 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) |
+| `app/tray.py` | 감시가 켜져 있을 때 창을 닫아도 계속 감시하도록 떠 있는 시스템 트레이 아이콘 (pystray) |
 | `app/gui.py` | tkinter 기반 GUI 전체. `DedupApp`(메인 창), `OrderEditor`(사진 순서 정리 창), FastStone 탐지 함수 등 포함 |
 | `requirements.txt` | pip으로 설치할 의존성 목록 |
 | `build.bat` | venv 활성화 후 실행하면 exe와 설치 프로그램을 한 번에 빌드하는 배치 스크립트 |
@@ -106,6 +123,7 @@ Pillow>=10.0.0
 imagehash>=4.3.1
 tkinterdnd2>=0.3.0
 send2trash>=1.8.0
+pystray>=0.19.0
 pyinstaller>=6.0.0
 ```
 
@@ -119,14 +137,16 @@ pefile==2024.8.26
 pillow==12.3.0
 pyinstaller==6.22.2
 pyinstaller-hooks-contrib==2026.7
+pystray==0.19.5
 PyWavelets==1.9.0
 pywin32-ctypes==0.2.3
 scipy==1.17.1
 Send2Trash==2.1.0
+six==1.17.0
 tkinterdnd2==0.6.3
 ```
-(`numpy`, `scipy`, `PyWavelets`, `packaging`, `pefile`, `altgraph`, `pyinstaller-hooks-contrib`, `pywin32-ctypes`는
-`imagehash`/`pyinstaller`가 내부적으로 요구하는 간접 의존성이며 직접 설치할 필요는 없습니다 - `requirements.txt`만
+(`numpy`, `scipy`, `PyWavelets`, `packaging`, `pefile`, `altgraph`, `pyinstaller-hooks-contrib`, `pywin32-ctypes`, `six`는
+`imagehash`/`pyinstaller`/`pystray`가 내부적으로 요구하는 간접 의존성이며 직접 설치할 필요는 없습니다 - `requirements.txt`만
 설치하면 pip이 알아서 함께 설치합니다.)
 
 ### 설치 프로그램(Setup.exe) 빌드에 필요한 외부 도구
@@ -157,10 +177,11 @@ https://www.innosetup.com
 | `app/gui.py` → `_FASTSTONE_COMMON_PATHS` | `C:\Program Files (x86)\FastStone Image Viewer\FSViewer.exe` 등 2개 경로 | FastStone Image Viewer 설치 경로 후보 | 코드가 이 경로들 + 레지스트리(App Paths)까지 자동으로 확인하므로 **보통 수정 불필요**. FastStone을 다른 경로에 설치했다면 이 리스트에 경로를 추가하세요. |
 | `installer.iss` → `AppId` | `{8F1E9C2E-7B3A-4C5D-9E1F-2A6B8C4D7E10}` | Inno Setup이 설치 프로그램을 식별하는 고유 GUID | 그대로 재현할 목적이면 **바꾸지 마세요**(바꾸면 "다른 프로그램"으로 인식되어 기존 설치본 위에 업데이트되지 않고 별도 설치됨). 완전히 새로운 별개 배포판을 만드는 경우에만 새 GUID로 교체하세요. |
 | `app/core.py` → `get_desktop_path()` | (하드코딩 값 없음, 레지스트리로 자동 탐지) | 바탕화면 실제 경로(OneDrive 리다이렉트 포함)를 `HKCU\...\Shell Folders`에서 읽어옴 | 수정 불필요 - 어떤 PC/계정에서도 자동으로 맞는 경로를 찾습니다. |
+| `app/settings.py` → `CONFIG_FILE` | `%APPDATA%\PhotoDedup\config.json` | "파일자동읽기 폴더지정"에서 저장한 감시 폴더 경로/켜짐 여부 (v1.1.0부터, 사용자별 저장) | 수정 불필요 - 계정마다 자동으로 알맞은 `%APPDATA%` 경로를 사용합니다. 파일이 없으면 감시 꺼짐 상태로 시작합니다. |
 
-**환경변수는 사용하지 않습니다.** 별도의 `config.yaml`, `settings.json` 같은 설정 파일도 없습니다 -
-위 표의 값들이 이 프로젝트의 "설정"에 해당하는 전부이며, 전부 소스코드(`app/gui.py`, `installer.iss`) 안에
-상수로 들어 있습니다.
+**환경변수는 사용하지 않습니다.** v1.1.0부터 "파일자동읽기 폴더지정" 설정 하나만 `app/settings.py`를
+통해 `%APPDATA%\PhotoDedup\config.json`에 저장됩니다(위 표 참고). 그 외 값들은 여전히 소스코드
+(`app/gui.py`, `installer.iss`) 안에 상수로 들어 있습니다.
 
 ---
 
@@ -198,13 +219,14 @@ python main.py
 pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
     --collect-all tkinterdnd2 ^
     --collect-all imagehash ^
+    --collect-all pystray ^
     main.py
 #    결과: dist\PhotoDedup.exe (약 60MB, 콘솔 창 없이 GUI만 뜸)
 
 # 7) (선택) 정식 설치 프로그램(Setup.exe)까지 빌드
 winget install JRSoftware.InnoSetup
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-#    결과: installer_output\PhotoDedup_Setup_1.0.0.exe
+#    결과: installer_output\PhotoDedup_Setup_1.1.0.exe
 
 # 6~7번은 build.bat 하나로 한 번에 실행 가능:
 build.bat
@@ -213,7 +235,7 @@ build.bat
 실행 방식별 정리:
 - **개발 중 GUI 확인**: `python main.py` (인자 없음)
 - **개발 중 CLI로 빠르게 검증**: `python main.py photos.zip --threshold 8 --rotate-flip`
-- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.0.0.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
+- **배포용 실행**: `dist\PhotoDedup.exe` 더블클릭 (또는 `installer_output\PhotoDedup_Setup_1.1.0.exe`로 정식 설치 후 시작메뉴/바탕화면 아이콘 실행)
 - **zip 우클릭 자동실행**: 설치 프로그램으로 설치하면서 "탐색기에서 zip 파일 우클릭 시 ... 메뉴 추가" 옵션을 체크하면, 이후 아무 zip이나 우클릭 → "중복 사진 정리 도구로 열기"로 자동실행 가능
 
 ---
@@ -234,7 +256,10 @@ build.bat
   → 파일 목록에 그 zip이 자동으로 채워지고, "처리 시작"과 "결과 폴더 열기"까지 자동으로 진행된다.
   (최종 "최종 결과폴더로 보내기" 확정만은 사람이 직접 눌러야 한다 - 순서 확인 없이 파일명이
   바뀌거나 원본 zip이 휴지통으로 가는 일을 막기 위함)
-- "-"로 시작하는 옵션과 함께 실행: 콘솔(CLI) 모드 (예: main.exe photos.zip --threshold 8)
+- "--tray": "파일자동읽기 폴더지정"에서 저장한 감시를 Windows 시작 시 자동으로 재개하기 위한
+  모드. 창을 띄우지 않고 트레이 아이콘 + 폴더 감시만 시작한다(GUI에서 감시를 켤 때 이 옵션과
+  함께 자기 자신을 Windows 시작프로그램으로 등록한다).
+- "-"로 시작하는 다른 옵션과 함께 실행: 콘솔(CLI) 모드 (예: main.exe photos.zip --threshold 8)
 """
 import sys
 
@@ -248,6 +273,11 @@ def main():
             from app.gui import main as gui_main
             gui_main(auto_zip_paths=zip_paths)
             return
+
+    if args and args[0] == "--tray":
+        from app.gui import main as gui_main
+        gui_main(start_hidden=True)
+        return
 
     if args:
         from app.cli import main as cli_main
@@ -738,6 +768,273 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
+### `app/settings.py`
+```python
+"""
+사용자 설정 저장/불러오기.
+
+현재는 "파일자동읽기 폴더지정"(다운로드 폴더 자동 감시) 설정 하나만 저장한다.
+%APPDATA%\\PhotoDedup\\config.json 에 저장하며, 프로그램 자체 설치 위치(Program Files 등)에는
+쓰기 권한이 없을 수 있어 반드시 사용자별 쓰기 가능 폴더(APPDATA)를 사용한다.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "PhotoDedup"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+DEFAULTS = {
+    "watch_folder": "",
+    "watch_enabled": False,
+}
+
+
+def load_settings() -> dict:
+    if CONFIG_FILE.is_file():
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {**DEFAULTS, **data}
+        except Exception:
+            pass
+    return dict(DEFAULTS)
+
+
+def save_settings(settings: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    merged = {**DEFAULTS, **settings}
+    CONFIG_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+```
+
+### `app/watcher.py`
+```python
+"""
+"파일자동읽기 폴더지정" 기능 - 지정한 폴더에 새 zip 파일이 들어오면 자동으로 감지한다.
+
+외부 라이브러리(watchdog 등) 없이, 짧은 주기로 폴더를 다시 스캔하는 방식(폴링)으로 구현한다.
+새로 나타난 zip 파일은 파일 크기가 잠깐 사이 변하지 않을 때(=다운로드가 끝났다고 볼 수 있을 때)만
+콜백으로 전달한다 - 다운로드 도중인 파일을 성급하게 열어 실패하는 것을 막기 위함이다.
+
+알집(ALZip)의 "폴더 감시 후 자동 압축풀기" 기능이 켜져 있으면 같은 폴더에 zip이 들어올 때
+알집도 동시에 압축풀기 진행 창을 띄운다. `close_alzip_windows_soon()`은 제목에 "알집"이 포함된
+최상위 창을 찾아 자동으로 닫아 준다(사용자가 매번 직접 닫지 않아도 되도록).
+"""
+from __future__ import annotations
+
+import ctypes
+import os
+import threading
+import time
+from ctypes import wintypes
+
+POLL_INTERVAL_SEC = 2.0
+STABLE_CHECK_SEC = 1.5  # 이 시간 동안 파일 크기가 그대로면 다운로드가 끝난 것으로 판단
+ALZIP_CLOSE_DURATION_SEC = 8.0  # 새 zip 감지 뒤 이 시간 동안 알집 창이 뜨는지 반복 확인
+ALZIP_CLOSE_INTERVAL_SEC = 0.5
+
+_WM_CLOSE = 0x0010
+_ALZIP_TITLE_KEYWORDS = ("알집",)
+
+_user32 = ctypes.windll.user32 if os.name == "nt" else None
+_EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM) if os.name == "nt" else None
+
+
+def _get_window_text(hwnd) -> str:
+    length = _user32.GetWindowTextLengthW(hwnd)
+    if length == 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+
+def close_alzip_windows() -> int:
+    """제목에 '알집'이 포함된 최상위 창을 찾아 닫는다(WM_CLOSE 전송). 닫은 개수를 반환한다."""
+    if _user32 is None:
+        return 0
+    closed = 0
+
+    def _callback(hwnd, _lparam):
+        nonlocal closed
+        if not _user32.IsWindowVisible(hwnd):
+            return True
+        title = _get_window_text(hwnd)
+        if title and any(k in title for k in _ALZIP_TITLE_KEYWORDS):
+            _user32.PostMessageW(hwnd, _WM_CLOSE, 0, 0)
+            closed += 1
+        return True
+
+    _user32.EnumWindows(_EnumWindowsProc(_callback), 0)
+    return closed
+
+
+def close_alzip_windows_soon() -> None:
+    """알집이 뒤늦게 압축풀기 창을 띄우는 경우까지 잡기 위해 잠깐 동안 반복해서 닫기를 시도한다."""
+    if _user32 is None:
+        return
+
+    def _worker():
+        end = time.time() + ALZIP_CLOSE_DURATION_SEC
+        while time.time() < end:
+            close_alzip_windows()
+            time.sleep(ALZIP_CLOSE_INTERVAL_SEC)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+class FolderWatcher(threading.Thread):
+    """지정된 폴더를 주기적으로 스캔해 새로 생긴 zip 파일을 콜백으로 전달하는 백그라운드 스레드."""
+
+    def __init__(self, folder: str, on_new_zip):
+        super().__init__(daemon=True)
+        self.folder = folder
+        self.on_new_zip = on_new_zip
+        self._stop_event = threading.Event()
+        self._seen: set[str] = set()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        # 감시 시작 시점에 이미 폴더에 있던 zip은 대상에서 제외한다(감시를 켜기 전부터 있던
+        # 파일까지 전부 자동으로 처리되기 시작하면 안 되므로).
+        self._seen = self._list_zip_names()
+        while not self._stop_event.is_set():
+            try:
+                self._scan_once()
+            except Exception:
+                pass
+            self._stop_event.wait(POLL_INTERVAL_SEC)
+
+    def _list_zip_names(self) -> set[str]:
+        try:
+            return {f for f in os.listdir(self.folder) if f.lower().endswith(".zip")}
+        except OSError:
+            return set()
+
+    def _scan_once(self) -> None:
+        current = self._list_zip_names()
+        for name in current - self._seen:
+            path = os.path.join(self.folder, name)
+            if self._is_stable(path):
+                self._seen.add(name)
+                close_alzip_windows_soon()
+                self.on_new_zip(path)
+            # 크기가 아직 안정되지 않았으면(다운로드 진행 중일 가능성) _seen에 넣지 않고
+            # 다음 스캔 주기에 다시 확인한다.
+
+    def _is_stable(self, path: str) -> bool:
+        try:
+            size1 = os.path.getsize(path)
+        except OSError:
+            return False
+        time.sleep(STABLE_CHECK_SEC)
+        try:
+            size2 = os.path.getsize(path)
+        except OSError:
+            return False
+        return size1 == size2 and size1 > 0
+```
+
+### `app/startup.py`
+```python
+"""
+Windows 로그인 시 자동 실행 등록/해제.
+
+HKCU(현재 사용자)의 Run 키에만 값을 쓴다 - 관리자 권한이 필요 없고, 시스템 전체(HKLM)가
+아닌 이 계정에만 영향을 준다. "파일자동읽기 폴더지정"을 저장/해제할 때만 호출된다.
+"""
+from __future__ import annotations
+
+import sys
+
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE_NAME = "PhotoDedup"
+
+
+def _startup_command() -> str:
+    if getattr(sys, "frozen", False):
+        # PyInstaller로 빌드된 exe: 그 exe 자신을 --tray로 실행
+        return f'"{sys.executable}" --tray'
+    # 개발 환경(python main.py)에서 테스트할 때
+    from pathlib import Path
+    main_py = Path(__file__).resolve().parent.parent / "main.py"
+    return f'"{sys.executable}" "{main_py}" --tray'
+
+
+def enable_startup() -> None:
+    if sys.platform != "win32":
+        return
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as key:
+        winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ, _startup_command())
+
+
+def disable_startup() -> None:
+    if sys.platform != "win32":
+        return
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, _RUN_VALUE_NAME)
+    except FileNotFoundError:
+        pass
+```
+
+### `app/tray.py`
+```python
+"""
+시스템 트레이 아이콘.
+
+"파일자동읽기 폴더지정" 감시가 켜져 있는 동안, 메인 창을 닫아도(X 버튼) 프로그램이 완전히
+종료되지 않고 트레이로 내려가 계속 폴더를 감시할 수 있게 해준다. pystray가 설치되어 있지
+않으면(예: 개발 환경에 아직 pip install을 안 한 경우) 트레이 없이도 감시 기능 자체는
+동작하되, 창을 닫으면 프로그램이 종료된다(watcher도 함께 멈춤).
+"""
+from __future__ import annotations
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    _HAS_TRAY = True
+except Exception:
+    _HAS_TRAY = False
+
+APP_TITLE = "중복 사진 정리 도구"
+
+
+def is_available() -> bool:
+    return _HAS_TRAY
+
+
+def _make_icon_image():
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([2, 2, 61, 61], fill=(47, 125, 209, 255))
+    d.rectangle([16, 18, 48, 24], fill=(255, 255, 255, 255))
+    d.rectangle([16, 30, 48, 36], fill=(255, 255, 255, 255))
+    d.rectangle([16, 42, 40, 48], fill=(255, 255, 255, 255))
+    return img
+
+
+def create_tray_icon(on_show, on_quit):
+    """트레이 아이콘 객체를 만들어 반환한다(아직 실행하지 않은 상태). pystray가 없으면 None."""
+    if not _HAS_TRAY:
+        return None
+    return pystray.Icon(
+        "PhotoDedup",
+        _make_icon_image(),
+        f"{APP_TITLE} (자동감시 중)",
+        menu=pystray.Menu(
+            pystray.MenuItem("창 열기", lambda: on_show()),
+            pystray.MenuItem("완전히 종료", lambda: on_quit()),
+        ),
+    )
+```
+
 ### `app/gui.py`
 ```python
 """
@@ -768,6 +1065,10 @@ from PIL import Image, ImageTk
 from send2trash import send2trash
 
 from . import core
+from . import settings as app_settings
+from . import startup as app_startup
+from . import tray as app_tray
+from . import watcher as app_watcher
 
 APP_TITLE = "중복 사진 정리 도구"
 THUMB_SIZE = (110, 110)
@@ -820,8 +1121,8 @@ class DedupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x640")
-        self.root.minsize(680, 560)
+        self.root.geometry("760x760")
+        self.root.minsize(680, 660)
 
         self.zip_paths: list[str] = []
         self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
@@ -832,8 +1133,15 @@ class DedupApp:
         self.thumb_cache: list = []  # PhotoImage 참조 유지용
         self._auto_open_order_editor = False  # 자동 실행 모드에서 처리 끝나면 순서 정리 창까지 자동으로 열지 여부
 
+        # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
+        self.folder_watcher: app_watcher.FolderWatcher | None = None
+        self.tray_icon = None
+        self._watch_pending: list[str] = []  # 처리 중일 때 들어온 감시 대상 zip 대기열
+        self._order_editor_open = False
+
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._maybe_resume_watch()
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -924,6 +1232,37 @@ class DedupApp:
         self.log_text = tk.Text(self.result_frame, height=8, state="disabled", wrap="word")
         self.log_text.pack(fill="both", expand=True, pady=(8, 0))
 
+        # 파일자동읽기 폴더지정 (지정 폴더에 zip이 들어오면 자동으로 처리 시작)
+        watch_frame = tk.LabelFrame(self.root, text="파일자동읽기 폴더지정", padx=8, pady=8)
+        watch_frame.pack(fill="x", **pad)
+
+        tk.Label(
+            watch_frame,
+            text="지정한 폴더에 사진 zip 파일이 들어오면 자동으로 이 프로그램이 실행되어 처리합니다.\n"
+                 "(\"최종 결과폴더로 보내기\" 확정만은 항상 사람이 직접 눌러야 합니다)",
+            fg="#555555", justify="left",
+        ).pack(anchor="w")
+
+        watch_row = tk.Frame(watch_frame)
+        watch_row.pack(fill="x", pady=(6, 0))
+        saved = app_settings.load_settings()
+        default_folder = saved["watch_folder"] or str(Path.home() / "Downloads")
+        self.watch_folder_var = tk.StringVar(value=default_folder)
+        tk.Entry(watch_row, textvariable=self.watch_folder_var).pack(side="left", fill="x", expand=True)
+        tk.Button(watch_row, text="찾아보기...", command=self._on_browse_watch_folder).pack(side="left", padx=(6, 0))
+
+        watch_btn_row = tk.Frame(watch_frame)
+        watch_btn_row.pack(fill="x", pady=(6, 0))
+        self.watch_status_label = tk.Label(watch_btn_row, text="", fg="#555555", anchor="w")
+        self.watch_status_label.pack(side="left", fill="x", expand=True)
+        tk.Button(watch_btn_row, text="감시 끄기", command=self._on_disable_watch).pack(side="right")
+        tk.Button(
+            watch_btn_row, text="저장", command=self._on_save_watch_settings,
+            bg="#2f7dd1", fg="white",
+        ).pack(side="right", padx=(0, 6))
+
+        self._update_watch_status_label(saved["watch_enabled"], saved["watch_folder"])
+
     # ------------------------------------------------------------------
     # 파일 입력
     # ------------------------------------------------------------------
@@ -960,7 +1299,108 @@ class DedupApp:
         self.threshold_label.config(text=f"{v}  ({label})")
 
     # ------------------------------------------------------------------
-    # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그)
+    # 파일자동읽기 폴더지정 (감시 폴더에 새 zip이 들어오면 자동으로 처리)
+    # ------------------------------------------------------------------
+    def _update_watch_status_label(self, enabled: bool, folder: str):
+        if enabled and folder:
+            text = f"감시 중: {folder}  (Windows 시작 시 자동 실행 + 트레이 상주)"
+        else:
+            text = "감시 꺼짐"
+        self.watch_status_label.config(text=text)
+
+    def _on_browse_watch_folder(self):
+        initial = self.watch_folder_var.get().strip() or str(Path.home() / "Downloads")
+        if not os.path.isdir(initial):
+            initial = str(Path.home())
+        folder = filedialog.askdirectory(title="감시할 폴더 선택", initialdir=initial)
+        if folder:
+            self.watch_folder_var.set(folder)
+
+    def _on_save_watch_settings(self):
+        folder = self.watch_folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning(APP_TITLE, "존재하는 폴더 경로를 입력해주세요.")
+            return
+
+        app_settings.save_settings({"watch_folder": folder, "watch_enabled": True})
+        self._start_watch_internal(folder)
+        self._ensure_tray()
+        try:
+            app_startup.enable_startup()
+        except Exception as e:
+            messagebox.showwarning(APP_TITLE, f"Windows 시작 프로그램 등록에 실패했습니다:\n{e}")
+        self._update_watch_status_label(True, folder)
+        messagebox.showinfo(
+            APP_TITLE,
+            f"'{folder}' 폴더 감시를 시작합니다.\n"
+            "이제부터 이 폴더에 사진 zip 파일이 들어오면 자동으로 처리를 시작합니다.\n"
+            "창을 닫아도 트레이 아이콘에 상주하며 계속 감시합니다.",
+        )
+
+    def _on_disable_watch(self):
+        folder = self.watch_folder_var.get().strip()
+        app_settings.save_settings({"watch_folder": folder, "watch_enabled": False})
+        self._stop_watch_internal()
+        try:
+            app_startup.disable_startup()
+        except Exception:
+            pass
+        self._update_watch_status_label(False, folder)
+
+    def _start_watch_internal(self, folder: str):
+        self._stop_watch_internal()
+        self.folder_watcher = app_watcher.FolderWatcher(folder, self._on_watcher_new_zip)
+        self.folder_watcher.start()
+
+    def _stop_watch_internal(self):
+        if self.folder_watcher is not None:
+            self.folder_watcher.stop()
+            self.folder_watcher = None
+
+    def _maybe_resume_watch(self):
+        """이전에 저장해 둔 감시 설정이 켜져 있으면(예: Windows 시작 시 자동 실행) 다시 감시를 시작한다."""
+        saved = app_settings.load_settings()
+        if saved["watch_enabled"] and saved["watch_folder"] and os.path.isdir(saved["watch_folder"]):
+            self._start_watch_internal(saved["watch_folder"])
+            self._ensure_tray()
+
+    def _on_watcher_new_zip(self, zip_path: str):
+        # 이 콜백은 감시 스레드에서 호출되므로, tkinter 위젯 조작은 반드시 메인 스레드로 넘긴다.
+        self.root.after(0, lambda: self._handle_watched_zip(zip_path))
+
+    def _handle_watched_zip(self, zip_path: str):
+        self.root.deiconify()
+        self.root.lift()
+        self._watch_pending.append(zip_path)
+        self._drain_watch_queue()
+
+    def _drain_watch_queue(self):
+        if not self._watch_pending:
+            return
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+        if self._order_editor_open:
+            return
+        next_zip = self._watch_pending.pop(0)
+        self.run_auto([next_zip])
+
+    # ------------------------------------------------------------------
+    # 트레이 아이콘 / 종료 (감시가 켜져 있는 동안 창을 닫아도 계속 감시하기 위함)
+    # ------------------------------------------------------------------
+    def _ensure_tray(self):
+        if self.tray_icon is not None or not app_tray.is_available():
+            return
+        self.tray_icon = app_tray.create_tray_icon(on_show=self._show_from_tray, on_quit=self._quit_from_tray)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def _show_from_tray(self):
+        self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
+
+    def _quit_from_tray(self):
+        self.root.after(0, self._shutdown)
+
+    # ------------------------------------------------------------------
+    # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그 / 감시 폴더 감지)
     # ------------------------------------------------------------------
     def run_auto(self, zip_paths: list):
         """전달받은 zip으로 파일 선택 → 처리 시작 → 결과 폴더 열기까지 자동으로 진행한다.
@@ -974,6 +1414,9 @@ class DedupApp:
             messagebox.showwarning(APP_TITLE, "다음 zip 파일을 찾을 수 없습니다:\n" + "\n".join(missing))
         if not valid:
             return
+        # 감시 폴더에서 반복적으로 자동 실행될 수 있으므로, 이전 자동 실행에서 남아있을 수 있는
+        # 목록을 지우고 이번에 전달받은 zip만으로 새로 시작한다(누적되어 옛 zip까지 다시 처리되는 것을 방지).
+        self._on_clear_files()
         self._add_zip_paths(valid)
         self._auto_open_order_editor = True
         self._on_start()
@@ -1100,6 +1543,7 @@ class DedupApp:
         self.summary_label.config(text="처리 중 오류가 발생했습니다.")
         self._log(f"[오류] {message}")
         messagebox.showerror(APP_TITLE, f"처리 중 오류가 발생했습니다:\n{message}")
+        self._drain_watch_queue()
 
     # ------------------------------------------------------------------
     # 결과 액션
@@ -1126,12 +1570,19 @@ class DedupApp:
 
     def _on_edit_order(self):
         if not self.result or not os.path.isdir(self.result.output_dir):
+            self._drain_watch_queue()
             return
         items = sorted([g.kept for g in self.result.groups], key=lambda it: it.order_index)
         if not items:
             messagebox.showinfo(APP_TITLE, "정리된 사진이 없습니다.")
+            self._drain_watch_queue()
             return
+        self._order_editor_open = True
         OrderEditor(self, items, source_zip_paths=self.last_zip_paths)
+
+    def _on_order_editor_closed(self):
+        self._order_editor_open = False
+        self._drain_watch_queue()
 
     def _on_preview(self):
         if not self.result:
@@ -1235,6 +1686,20 @@ class DedupApp:
         self.log_text.config(state="disabled")
 
     def _on_close(self):
+        # 감시가 켜져 있고 트레이 아이콘이 떠 있으면, 창만 숨기고 감시는 계속한다.
+        if self.folder_watcher is not None and self.tray_icon is not None:
+            self.root.withdraw()
+            return
+        self._shutdown()
+
+    def _shutdown(self):
+        self._stop_watch_internal()
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
         if self.work_dir and os.path.isdir(self.work_dir):
             shutil.rmtree(self.work_dir, ignore_errors=True)
         self.root.destroy()
@@ -1326,7 +1791,7 @@ class OrderEditor:
         tk.Button(btn_frame, text="선택 위로", command=lambda: self._move_selected(-1)).pack(side="left", padx=3)
         tk.Button(btn_frame, text="선택 아래로", command=lambda: self._move_selected(1)).pack(side="left", padx=3)
         tk.Button(btn_frame, text="선택 해제", command=self._clear_selection).pack(side="left", padx=3)
-        tk.Button(btn_frame, text="닫기 (변경 취소)", command=self.win.destroy).pack(side="left", padx=3)
+        tk.Button(btn_frame, text="닫기 (변경 취소)", command=self._on_cancel).pack(side="left", padx=3)
         tk.Button(
             btn_frame, text="최종 결과폴더로 보내기", command=self._confirm,
             bg="#2f7dd1", fg="white", font=("", 10, "bold"),
@@ -1571,6 +2036,10 @@ class OrderEditor:
         self.drag_start = None
         self.dragging = False
 
+    def _on_cancel(self):
+        self.win.destroy()
+        self.app._on_order_editor_closed()
+
     def _reorder_to(self, dragged_item, target_item):
         if target_item is None or target_item is dragged_item:
             return
@@ -1647,14 +2116,19 @@ class OrderEditor:
         messagebox.showinfo(APP_TITLE, summary)
         self.app._open_result_viewer(str(self.output_dir))
         self.win.destroy()
+        self.app._on_order_editor_closed()
 
 
-def main(auto_zip_paths: list | None = None):
+def main(auto_zip_paths: list | None = None, start_hidden: bool = False):
     if _HAS_DND:
         root = TkinterDnD.Tk()
     else:
         root = tk.Tk()
     app = DedupApp(root)
+    if start_hidden:
+        # Windows 시작 시 "--tray"로 자동 실행되는 경우: 창을 띄우지 않고 트레이 감시만 시작한다.
+        # (DedupApp.__init__의 _maybe_resume_watch()가 이미 감시/트레이를 켜 둔 상태다)
+        root.withdraw()
     if auto_zip_paths:
         root.after(200, lambda: app.run_auto(auto_zip_paths))
     root.mainloop()
@@ -1670,6 +2144,7 @@ Pillow>=10.0.0
 imagehash>=4.3.1
 tkinterdnd2>=0.3.0
 send2trash>=1.8.0
+pystray>=0.19.0
 pyinstaller>=6.0.0
 ```
 
@@ -1684,6 +2159,7 @@ REM   PhotoDedup> build.bat
 pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
     --collect-all tkinterdnd2 ^
     --collect-all imagehash ^
+    --collect-all pystray ^
     main.py
 
 echo.
@@ -1694,7 +2170,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.0.0.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.0.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -1709,7 +2185,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -1877,7 +2353,7 @@ python main.py
 ### 8-4. exe 빌드 검증
 ```bash
 pyinstaller --noconfirm --onefile --windowed --name PhotoDedup ^
-    --collect-all tkinterdnd2 --collect-all imagehash main.py
+    --collect-all tkinterdnd2 --collect-all imagehash --collect-all pystray main.py
 dist\PhotoDedup.exe
 ```
 - 콘솔 창 없이 GUI 창만 뜨는지 확인
@@ -1887,13 +2363,27 @@ dist\PhotoDedup.exe
 ### 8-5. 설치 프로그램 빌드/설치/제거 검증
 ```powershell
 "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
-installer_output\PhotoDedup_Setup_1.0.0.exe
+installer_output\PhotoDedup_Setup_1.1.0.exe
 ```
 - 설치 마법사에서 "탐색기에서 zip 파일 우클릭 시... 메뉴 추가" 체크박스가 보이는지 확인
 - 설치 후 임의의 zip 파일을 우클릭했을 때 "중복 사진 정리 도구로 열기" 메뉴가 보이는지, 클릭 시 자동실행되는지 확인
 - zip의 **기본(더블클릭) 프로그램은 바뀌지 않았는지** 확인 (설치 전/후 동일해야 함)
 - "프로그램 추가/제거"에서 제거했을 때 설치 폴더, 시작메뉴/바탕화면 바로가기, 위 컨텍스트 메뉴
-  레지스트리가 모두 깨끗이 삭제되는지 확인
+  레지스트리가 모두 깨끗이 삭제되는지 확인 (`HKCU\...\Run`에 자동 감시를 등록한 적이 있다면 그 값도
+  프로그램 제거와 별개로 GUI의 "감시 끄기"로 미리 해제해두는 것을 권장)
+
+### 8-6. "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 검증
+1. GUI 하단 "파일자동읽기 폴더지정"에서 빈 테스트 폴더를 지정하고 "저장" 클릭 →
+   "감시 중: ..." 상태로 바뀌고 안내 팝업이 뜨는지 확인
+2. 그 폴더에 사진이 든 zip 파일을 복사해 넣기 → 몇 초 안에 자동으로 파일 선택 → 처리 시작 →
+   결과 폴더 열기(순서 정리 화면)까지 자동 진행되는지 확인 ("최종 결과폴더로 보내기"는 여전히
+   사람이 눌러야 함)
+3. 메인 창을 닫기(X버튼) → 프로그램이 완전히 종료되지 않고 트레이 아이콘에 남아있는지 확인,
+   트레이 아이콘 우클릭 → "창 열기"로 다시 창이 뜨는지, "완전히 종료"로 트레이까지 종료되는지 확인
+4. `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`에 `PhotoDedup` 값이 등록되었는지 확인
+   (`Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`)
+5. GUI에서 "감시 끄기" 클릭 → 위 Run 값이 삭제되고, 폴더에 새 zip을 넣어도 더는 자동 실행되지
+   않는지 확인
 
 > Git Bash(MSYS)에서 설치 프로그램을 커맨드라인 옵션과 함께 직접 실행해 무음 설치를 테스트하려면
 > `/VERYSILENT` 대신 `//VERYSILENT`(슬래시 두 개)를 써야 합니다. 자세한 이유는 9번 트러블슈팅 참고.

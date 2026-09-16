@@ -44,6 +44,18 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
 
 7. "최종 결과폴더로 보내기" 확정 단계는 사람이 직접 눌러야 하는 구조를 유지할 것
    — 자동 실행 모드도 이 단계만큼은 자동화하지 않는 것이 이 프로젝트의 핵심 설계 원칙
+
+8. (v1.1.0부터) "파일자동읽기 폴더지정"(감시 폴더 자동 처리) 기능도 위 7번 원칙을 그대로
+   따른다 — app/watcher.py가 감시 폴더에서 새 zip을 감지해 app/gui.py의 run_auto()를
+   자동 호출하지만, run_auto()는 항상 OrderEditor를 띄운 채로 멈추고 "최종 결과폴더로
+   보내기"는 여전히 사람이 직접 눌러야 한다. 이 흐름을 자동화하는 방향으로 바꾸지 말 것
+
+9. app/watcher.py의 close_alzip_windows()는 창 제목에 "알집"이 포함된 창만 닫는다 —
+   이 키워드 매칭 범위를 넓히면(예: 아무 zip 관련 창이나 닫기) 사용자가 보고 있던 다른
+   무관한 창을 실수로 닫을 위험이 있으므로, 반드시 특정 프로그램 이름으로 좁게 유지할 것
+
+10. app/startup.py는 HKCU(현재 사용자)의 Run 키에만 값을 쓴다 — HKLM(시스템 전체)로
+    바꾸면 관리자 권한이 필요해지고 다른 계정에도 영향을 주게 되므로 바꾸지 말 것
 ```
 
 ## 주요 파일
@@ -54,6 +66,10 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
 | `app/core.py` | 핵심 로직 (`process_zips()`가 전체 진입점) |
 | `app/gui.py` | GUI 전체 (`DedupApp`, `OrderEditor`) |
 | `app/cli.py` | CLI |
+| `app/settings.py` | "파일자동읽기 폴더지정" 설정 저장/불러오기 (`%APPDATA%\PhotoDedup\config.json`) |
+| `app/watcher.py` | 감시 폴더 폴링(`FolderWatcher`) + 알집 창 자동 닫기(`close_alzip_windows`) |
+| `app/startup.py` | Windows 로그인 시 자동 실행 등록/해제 (`HKCU\...\Run`) |
+| `app/tray.py` | 시스템 트레이 아이콘(pystray) |
 | `installer.iss` | 설치 프로그램 정의 |
 | `README.md` | 사용자용 설명서(GitHub 저장소 첫 화면) |
 | `REPRODUCTION_GUIDE.md` | 전체 소스 원문 포함 재현 가이드 |

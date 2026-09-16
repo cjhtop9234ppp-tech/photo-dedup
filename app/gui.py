@@ -26,6 +26,10 @@ from PIL import Image, ImageTk
 from send2trash import send2trash
 
 from . import core
+from . import settings as app_settings
+from . import startup as app_startup
+from . import tray as app_tray
+from . import watcher as app_watcher
 
 APP_TITLE = "중복 사진 정리 도구"
 THUMB_SIZE = (110, 110)
@@ -78,8 +82,8 @@ class DedupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x640")
-        self.root.minsize(680, 560)
+        self.root.geometry("760x760")
+        self.root.minsize(680, 660)
 
         self.zip_paths: list[str] = []
         self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
@@ -90,8 +94,15 @@ class DedupApp:
         self.thumb_cache: list = []  # PhotoImage 참조 유지용
         self._auto_open_order_editor = False  # 자동 실행 모드에서 처리 끝나면 순서 정리 창까지 자동으로 열지 여부
 
+        # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
+        self.folder_watcher: app_watcher.FolderWatcher | None = None
+        self.tray_icon = None
+        self._watch_pending: list[str] = []  # 처리 중일 때 들어온 감시 대상 zip 대기열
+        self._order_editor_open = False
+
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._maybe_resume_watch()
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -182,6 +193,37 @@ class DedupApp:
         self.log_text = tk.Text(self.result_frame, height=8, state="disabled", wrap="word")
         self.log_text.pack(fill="both", expand=True, pady=(8, 0))
 
+        # 파일자동읽기 폴더지정 (지정 폴더에 zip이 들어오면 자동으로 처리 시작)
+        watch_frame = tk.LabelFrame(self.root, text="파일자동읽기 폴더지정", padx=8, pady=8)
+        watch_frame.pack(fill="x", **pad)
+
+        tk.Label(
+            watch_frame,
+            text="지정한 폴더에 사진 zip 파일이 들어오면 자동으로 이 프로그램이 실행되어 처리합니다.\n"
+                 "(\"최종 결과폴더로 보내기\" 확정만은 항상 사람이 직접 눌러야 합니다)",
+            fg="#555555", justify="left",
+        ).pack(anchor="w")
+
+        watch_row = tk.Frame(watch_frame)
+        watch_row.pack(fill="x", pady=(6, 0))
+        saved = app_settings.load_settings()
+        default_folder = saved["watch_folder"] or str(Path.home() / "Downloads")
+        self.watch_folder_var = tk.StringVar(value=default_folder)
+        tk.Entry(watch_row, textvariable=self.watch_folder_var).pack(side="left", fill="x", expand=True)
+        tk.Button(watch_row, text="찾아보기...", command=self._on_browse_watch_folder).pack(side="left", padx=(6, 0))
+
+        watch_btn_row = tk.Frame(watch_frame)
+        watch_btn_row.pack(fill="x", pady=(6, 0))
+        self.watch_status_label = tk.Label(watch_btn_row, text="", fg="#555555", anchor="w")
+        self.watch_status_label.pack(side="left", fill="x", expand=True)
+        tk.Button(watch_btn_row, text="감시 끄기", command=self._on_disable_watch).pack(side="right")
+        tk.Button(
+            watch_btn_row, text="저장", command=self._on_save_watch_settings,
+            bg="#2f7dd1", fg="white",
+        ).pack(side="right", padx=(0, 6))
+
+        self._update_watch_status_label(saved["watch_enabled"], saved["watch_folder"])
+
     # ------------------------------------------------------------------
     # 파일 입력
     # ------------------------------------------------------------------
@@ -218,7 +260,108 @@ class DedupApp:
         self.threshold_label.config(text=f"{v}  ({label})")
 
     # ------------------------------------------------------------------
-    # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그)
+    # 파일자동읽기 폴더지정 (감시 폴더에 새 zip이 들어오면 자동으로 처리)
+    # ------------------------------------------------------------------
+    def _update_watch_status_label(self, enabled: bool, folder: str):
+        if enabled and folder:
+            text = f"감시 중: {folder}  (Windows 시작 시 자동 실행 + 트레이 상주)"
+        else:
+            text = "감시 꺼짐"
+        self.watch_status_label.config(text=text)
+
+    def _on_browse_watch_folder(self):
+        initial = self.watch_folder_var.get().strip() or str(Path.home() / "Downloads")
+        if not os.path.isdir(initial):
+            initial = str(Path.home())
+        folder = filedialog.askdirectory(title="감시할 폴더 선택", initialdir=initial)
+        if folder:
+            self.watch_folder_var.set(folder)
+
+    def _on_save_watch_settings(self):
+        folder = self.watch_folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning(APP_TITLE, "존재하는 폴더 경로를 입력해주세요.")
+            return
+
+        app_settings.save_settings({"watch_folder": folder, "watch_enabled": True})
+        self._start_watch_internal(folder)
+        self._ensure_tray()
+        try:
+            app_startup.enable_startup()
+        except Exception as e:
+            messagebox.showwarning(APP_TITLE, f"Windows 시작 프로그램 등록에 실패했습니다:\n{e}")
+        self._update_watch_status_label(True, folder)
+        messagebox.showinfo(
+            APP_TITLE,
+            f"'{folder}' 폴더 감시를 시작합니다.\n"
+            "이제부터 이 폴더에 사진 zip 파일이 들어오면 자동으로 처리를 시작합니다.\n"
+            "창을 닫아도 트레이 아이콘에 상주하며 계속 감시합니다.",
+        )
+
+    def _on_disable_watch(self):
+        folder = self.watch_folder_var.get().strip()
+        app_settings.save_settings({"watch_folder": folder, "watch_enabled": False})
+        self._stop_watch_internal()
+        try:
+            app_startup.disable_startup()
+        except Exception:
+            pass
+        self._update_watch_status_label(False, folder)
+
+    def _start_watch_internal(self, folder: str):
+        self._stop_watch_internal()
+        self.folder_watcher = app_watcher.FolderWatcher(folder, self._on_watcher_new_zip)
+        self.folder_watcher.start()
+
+    def _stop_watch_internal(self):
+        if self.folder_watcher is not None:
+            self.folder_watcher.stop()
+            self.folder_watcher = None
+
+    def _maybe_resume_watch(self):
+        """이전에 저장해 둔 감시 설정이 켜져 있으면(예: Windows 시작 시 자동 실행) 다시 감시를 시작한다."""
+        saved = app_settings.load_settings()
+        if saved["watch_enabled"] and saved["watch_folder"] and os.path.isdir(saved["watch_folder"]):
+            self._start_watch_internal(saved["watch_folder"])
+            self._ensure_tray()
+
+    def _on_watcher_new_zip(self, zip_path: str):
+        # 이 콜백은 감시 스레드에서 호출되므로, tkinter 위젯 조작은 반드시 메인 스레드로 넘긴다.
+        self.root.after(0, lambda: self._handle_watched_zip(zip_path))
+
+    def _handle_watched_zip(self, zip_path: str):
+        self.root.deiconify()
+        self.root.lift()
+        self._watch_pending.append(zip_path)
+        self._drain_watch_queue()
+
+    def _drain_watch_queue(self):
+        if not self._watch_pending:
+            return
+        if self.worker_thread and self.worker_thread.is_alive():
+            return
+        if self._order_editor_open:
+            return
+        next_zip = self._watch_pending.pop(0)
+        self.run_auto([next_zip])
+
+    # ------------------------------------------------------------------
+    # 트레이 아이콘 / 종료 (감시가 켜져 있는 동안 창을 닫아도 계속 감시하기 위함)
+    # ------------------------------------------------------------------
+    def _ensure_tray(self):
+        if self.tray_icon is not None or not app_tray.is_available():
+            return
+        self.tray_icon = app_tray.create_tray_icon(on_show=self._show_from_tray, on_quit=self._quit_from_tray)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def _show_from_tray(self):
+        self.root.after(0, lambda: (self.root.deiconify(), self.root.lift()))
+
+    def _quit_from_tray(self):
+        self.root.after(0, self._shutdown)
+
+    # ------------------------------------------------------------------
+    # 자동 실행 (탐색기 우클릭 "중복 사진 정리 도구로 열기" / zip을 exe로 드래그 / 감시 폴더 감지)
     # ------------------------------------------------------------------
     def run_auto(self, zip_paths: list):
         """전달받은 zip으로 파일 선택 → 처리 시작 → 결과 폴더 열기까지 자동으로 진행한다.
@@ -232,6 +375,9 @@ class DedupApp:
             messagebox.showwarning(APP_TITLE, "다음 zip 파일을 찾을 수 없습니다:\n" + "\n".join(missing))
         if not valid:
             return
+        # 감시 폴더에서 반복적으로 자동 실행될 수 있으므로, 이전 자동 실행에서 남아있을 수 있는
+        # 목록을 지우고 이번에 전달받은 zip만으로 새로 시작한다(누적되어 옛 zip까지 다시 처리되는 것을 방지).
+        self._on_clear_files()
         self._add_zip_paths(valid)
         self._auto_open_order_editor = True
         self._on_start()
@@ -358,6 +504,7 @@ class DedupApp:
         self.summary_label.config(text="처리 중 오류가 발생했습니다.")
         self._log(f"[오류] {message}")
         messagebox.showerror(APP_TITLE, f"처리 중 오류가 발생했습니다:\n{message}")
+        self._drain_watch_queue()
 
     # ------------------------------------------------------------------
     # 결과 액션
@@ -384,12 +531,19 @@ class DedupApp:
 
     def _on_edit_order(self):
         if not self.result or not os.path.isdir(self.result.output_dir):
+            self._drain_watch_queue()
             return
         items = sorted([g.kept for g in self.result.groups], key=lambda it: it.order_index)
         if not items:
             messagebox.showinfo(APP_TITLE, "정리된 사진이 없습니다.")
+            self._drain_watch_queue()
             return
+        self._order_editor_open = True
         OrderEditor(self, items, source_zip_paths=self.last_zip_paths)
+
+    def _on_order_editor_closed(self):
+        self._order_editor_open = False
+        self._drain_watch_queue()
 
     def _on_preview(self):
         if not self.result:
@@ -493,6 +647,20 @@ class DedupApp:
         self.log_text.config(state="disabled")
 
     def _on_close(self):
+        # 감시가 켜져 있고 트레이 아이콘이 떠 있으면, 창만 숨기고 감시는 계속한다.
+        if self.folder_watcher is not None and self.tray_icon is not None:
+            self.root.withdraw()
+            return
+        self._shutdown()
+
+    def _shutdown(self):
+        self._stop_watch_internal()
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
         if self.work_dir and os.path.isdir(self.work_dir):
             shutil.rmtree(self.work_dir, ignore_errors=True)
         self.root.destroy()
@@ -584,7 +752,7 @@ class OrderEditor:
         tk.Button(btn_frame, text="선택 위로", command=lambda: self._move_selected(-1)).pack(side="left", padx=3)
         tk.Button(btn_frame, text="선택 아래로", command=lambda: self._move_selected(1)).pack(side="left", padx=3)
         tk.Button(btn_frame, text="선택 해제", command=self._clear_selection).pack(side="left", padx=3)
-        tk.Button(btn_frame, text="닫기 (변경 취소)", command=self.win.destroy).pack(side="left", padx=3)
+        tk.Button(btn_frame, text="닫기 (변경 취소)", command=self._on_cancel).pack(side="left", padx=3)
         tk.Button(
             btn_frame, text="최종 결과폴더로 보내기", command=self._confirm,
             bg="#2f7dd1", fg="white", font=("", 10, "bold"),
@@ -829,6 +997,10 @@ class OrderEditor:
         self.drag_start = None
         self.dragging = False
 
+    def _on_cancel(self):
+        self.win.destroy()
+        self.app._on_order_editor_closed()
+
     def _reorder_to(self, dragged_item, target_item):
         if target_item is None or target_item is dragged_item:
             return
@@ -905,14 +1077,19 @@ class OrderEditor:
         messagebox.showinfo(APP_TITLE, summary)
         self.app._open_result_viewer(str(self.output_dir))
         self.win.destroy()
+        self.app._on_order_editor_closed()
 
 
-def main(auto_zip_paths: list | None = None):
+def main(auto_zip_paths: list | None = None, start_hidden: bool = False):
     if _HAS_DND:
         root = TkinterDnD.Tk()
     else:
         root = tk.Tk()
     app = DedupApp(root)
+    if start_hidden:
+        # Windows 시작 시 "--tray"로 자동 실행되는 경우: 창을 띄우지 않고 트레이 감시만 시작한다.
+        # (DedupApp.__init__의 _maybe_resume_watch()가 이미 감시/트레이를 켜 둔 상태다)
+        root.withdraw()
     if auto_zip_paths:
         root.after(200, lambda: app.run_auto(auto_zip_paths))
     root.mainloop()
