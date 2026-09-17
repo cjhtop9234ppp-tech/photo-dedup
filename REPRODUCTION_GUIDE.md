@@ -75,6 +75,7 @@ PhotoDedup/
 │   ├── watcher.py               # 감시 폴더 폴링(FolderWatcher) + 알집 창 자동 닫기
 │   ├── startup.py                 # Windows 로그인 시 자동 실행 등록/해제 (HKCU\...\Run)
 │   ├── tray.py                     # 시스템 트레이 아이콘 (pystray)
+│   ├── viewers.py                   # "이미지 도구 선택" - 레지스트리에서 이미지 뷰어 후보를 찾음
 │   └── gui.py                       # GUI 버전 (tkinter + tkinterdnd2), 사진 순서 편집 창(OrderEditor) 포함
 ├── main.py                     # 프로그램 진입점 (인자 없으면 GUI, zip 경로면 자동실행 GUI, --tray는 트레이 감시, 그 외 옵션은 CLI)
 ├── requirements.txt             # Python 의존성 목록
@@ -104,6 +105,7 @@ PhotoDedup/
 | `app/watcher.py` | 지정 폴더를 폴링해 새 zip을 감지하는 `FolderWatcher`, 알집 창을 자동으로 닫는 `close_alzip_windows_soon` |
 | `app/startup.py` | Windows 로그인 시 자동 실행 등록/해제 (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) |
 | `app/tray.py` | 감시가 켜져 있을 때 창을 닫아도 계속 감시하도록 떠 있는 시스템 트레이 아이콘 (pystray) |
+| `app/viewers.py` | "이미지 도구 선택" - .jpg/.png의 레지스트리 연결 정보로 이미지 뷰어 후보(이름, 실행경로) 목록을 만듦 |
 | `app/gui.py` | tkinter 기반 GUI 전체. `DedupApp`(메인 창), `OrderEditor`(사진 순서 정리 창), FastStone 탐지 함수 등 포함 |
 | `requirements.txt` | pip으로 설치할 의존성 목록 |
 | `build.bat` | venv 활성화 후 실행하면 exe와 설치 프로그램을 한 번에 빌드하는 배치 스크립트 |
@@ -902,9 +904,10 @@ class PendingRequestWatcher(threading.Thread):
 """
 사용자 설정 저장/불러오기.
 
-현재는 "파일자동읽기 폴더지정"(다운로드 폴더 자동 감시) 설정 하나만 저장한다.
-%APPDATA%\\PhotoDedup\\config.json 에 저장하며, 프로그램 자체 설치 위치(Program Files 등)에는
-쓰기 권한이 없을 수 있어 반드시 사용자별 쓰기 가능 폴더(APPDATA)를 사용한다.
+"파일자동읽기 폴더지정"(다운로드 폴더 자동 감시)과 "이미지 도구 선택"(결과 폴더를 열 때 쓸
+프로그램) 설정을 저장한다. %APPDATA%\\PhotoDedup\\config.json 에 저장하며, 프로그램 자체
+설치 위치(Program Files 등)에는 쓰기 권한이 없을 수 있어 반드시 사용자별 쓰기 가능
+폴더(APPDATA)를 사용한다.
 """
 from __future__ import annotations
 
@@ -918,6 +921,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULTS = {
     "watch_folder": "",
     "watch_enabled": False,
+    "viewer_path": "",  # 비어있으면 기존 동작(FastStone 자동 감지 → 없으면 탐색기) 그대로
+    "viewer_label": "",
 }
 
 
@@ -933,9 +938,135 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
+    """넘겨받은 키만 갱신하고 나머지 기존 설정은 그대로 유지한다.
+
+    예전에는 DEFAULTS 위에만 덮어써서, 예를 들어 뷰어 설정만 저장해도 감시 설정이
+    기본값으로 초기화돼버리는 문제가 있었다 - 반드시 "지금 저장된 값" 위에 덮어써야 한다.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    merged = {**DEFAULTS, **settings}
+    merged = {**load_settings(), **settings}
     CONFIG_FILE.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+```
+
+### `app/viewers.py`
+```python
+"""
+"이미지 도구 선택" - 결과 폴더를 열 때 쓸 이미지 뷰어 프로그램을 찾아 목록으로 보여준다.
+
+Windows에는 "설치된 모든 뷰어 프로그램" 목록을 한 번에 안전하게 가져오는 API가 없다.
+대신 실제 이 PC에서 확인되는 두 가지 근거를 사용한다:
+
+1. 사진 확장자(.jpg/.jpeg/.png)의 기본 연결 프로그램과, 탐색기 "다른 앱으로 열기"에
+   등록된 적 있는 프로그램들(`HKCR\\.jpg\\OpenWithProgids` 등)을 레지스트리에서 찾아
+   실행 경로까지 확인한다.
+2. FastStone Image Viewer는 `app/gui.py`의 `find_faststone_exe()`가 이미 흔한 설치
+   경로 + App Paths 레지스트리로 찾고 있으므로 그 결과도 항상 후보에 포함한다.
+
+이 방식으로도 못 찾는 프로그램(예: 설치 프로그램 없이 폴더에 풀어서 쓰는 프로그램)은
+목록에 자동으로 뜨지 않을 수 있다 - 이런 경우를 위해 GUI 쪽에 "찾아보기..."로 직접
+실행파일(.exe)을 고르는 방법을 항상 함께 제공한다.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+
+
+def _parse_command_exe(command: str) -> str | None:
+    """`"C:\\Program Files\\App\\app.exe" "%1"` 형태의 레지스트리 명령 문자열에서
+    실행파일 경로만 뽑아낸다."""
+    command = command.strip()
+    if not command:
+        return None
+    if command.startswith('"'):
+        end = command.find('"', 1)
+        exe = command[1:end] if end != -1 else command[1:]
+    else:
+        exe = command.split(" ", 1)[0]
+    return exe if exe else None
+
+
+def _resolve_progid_exe(progid: str) -> str | None:
+    if sys.platform != "win32":
+        return None
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{progid}\\shell\\open\\command")
+        command, _ = winreg.QueryValueEx(key, "")
+    except OSError:
+        return None
+    exe = _parse_command_exe(command)
+    if exe and os.path.isfile(exe):
+        return exe
+    return None
+
+
+def _candidate_progids_for_ext(ext: str) -> list[str]:
+    """이 확장자의 기본 연결 프로그램 + "다른 앱으로 열기" 후보 ProgId 목록."""
+    if sys.platform != "win32":
+        return []
+    import winreg
+    progids: list[str] = []
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, ext)
+        default_progid, _ = winreg.QueryValueEx(key, "")
+        if default_progid:
+            progids.append(default_progid)
+    except OSError:
+        pass
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, f"{ext}\\OpenWithProgids")
+        i = 0
+        while True:
+            try:
+                name, _, _ = winreg.EnumValue(key, i)
+            except OSError:
+                break
+            i += 1
+            # AppX(스토어 앱)는 exe 경로로 바로 실행할 수 없어 대상에서 제외한다.
+            if name and not name.startswith("AppX"):
+                progids.append(name)
+    except OSError:
+        pass
+    return progids
+
+
+def _friendly_label(progid: str, exe_path: str) -> str:
+    name = progid
+    for suffix in (".jpg", ".jpeg", ".png"):
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    name = name.strip(". ")
+    # "Hocr.Document.jpg.120"처럼 점이 남아있는 ProgId는 사람이 보기 불편하므로,
+    # 실행파일 이름을 대신 표시 이름으로 쓴다.
+    if not name or "." in name:
+        name = os.path.splitext(os.path.basename(exe_path))[0]
+    return name
+
+
+def detect_viewers() -> list[tuple[str, str]]:
+    """(표시 이름, 실행파일 경로) 목록을 돌려준다. 같은 실행파일은 한 번만 포함한다."""
+    if sys.platform != "win32":
+        return []
+
+    seen_paths: set[str] = set()
+    results: list[tuple[str, str]] = []
+
+    for ext in _IMAGE_EXTS:
+        for progid in _candidate_progids_for_ext(ext):
+            exe = _resolve_progid_exe(progid)
+            if not exe:
+                continue
+            key = os.path.normcase(exe)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            results.append((_friendly_label(progid, exe), exe))
+
+    return results
 ```
 
 ### `app/watcher.py`
@@ -1222,6 +1353,7 @@ from . import settings as app_settings
 from . import singleinstance as app_singleinstance
 from . import startup as app_startup
 from . import tray as app_tray
+from . import viewers as app_viewers
 from . import watcher as app_watcher
 
 APP_TITLE = "중복 사진 정리 도구"
@@ -1275,8 +1407,8 @@ class DedupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x920")
-        self.root.minsize(700, 860)
+        self.root.geometry("760x1080")
+        self.root.minsize(700, 1000)
 
         self.zip_paths: list[str] = []
         self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
@@ -1400,7 +1532,7 @@ class DedupApp:
         self.log_text.pack(fill="both", expand=True, pady=(8, 0))
 
         # 파일자동읽기 폴더지정 (지정 폴더에 zip이 들어오면 자동으로 처리 시작)
-        watch_frame = tk.LabelFrame(self.root, text="파일자동읽기 폴더지정", padx=8, pady=8)
+        watch_frame = tk.LabelFrame(self.root, text="4. 파일자동읽기 폴더지정", padx=8, pady=8)
         watch_frame.pack(fill="x", **pad)
 
         tk.Label(
@@ -1429,6 +1561,58 @@ class DedupApp:
         ).pack(side="right", padx=(0, 6))
 
         self._update_watch_status_label(saved["watch_enabled"], saved["watch_folder"])
+
+        # 이미지 도구 선택 (결과 폴더를 열 때 쓸 프로그램 - FastStone 대신 다른 뷰어도 지정 가능)
+        viewer_frame = tk.LabelFrame(self.root, text="5. 이미지 도구 선택", padx=8, pady=8)
+        viewer_frame.pack(fill="x", **pad)
+
+        tk.Label(
+            viewer_frame,
+            text="\"최종 결과폴더로 보내기\" 확정 뒤 결과 폴더를 열어줄 프로그램을 고르세요.\n"
+                 "(선택하지 않으면 기존처럼 FastStone Image Viewer → 없으면 탐색기 순으로 자동 실행됩니다)",
+            fg="#555555", justify="left",
+        ).pack(anchor="w")
+
+        self.viewer_choices: list[tuple[str, str]] = app_viewers.detect_viewers()
+        self._viewer_browse_label = "찾아보기로 직접 선택..."
+        combo_values = ["(자동) FastStone → 탐색기"] + [label for label, _ in self.viewer_choices] + [self._viewer_browse_label]
+
+        viewer_row = tk.Frame(viewer_frame)
+        viewer_row.pack(fill="x", pady=(8, 0))
+        self.viewer_var = tk.StringVar()
+        self.viewer_combo = ttk.Combobox(
+            viewer_row, textvariable=self.viewer_var, values=combo_values, state="readonly",
+        )
+        self.viewer_combo.pack(side="left", fill="x", expand=True)
+        self.viewer_combo.bind("<<ComboboxSelected>>", self._on_viewer_combo_change)
+
+        viewer_btn_row = tk.Frame(viewer_frame)
+        viewer_btn_row.pack(fill="x", pady=(6, 0))
+        self.viewer_status_label = tk.Label(viewer_btn_row, text="", fg="#555555", anchor="w")
+        self.viewer_status_label.pack(side="left", fill="x", expand=True)
+        tk.Button(
+            viewer_btn_row, text="저장", command=self._on_save_viewer_settings,
+            bg="#2f7dd1", fg="white",
+        ).pack(side="right")
+
+        saved_viewer_path = os.path.normpath(saved["viewer_path"]) if saved["viewer_path"] else ""
+        self._selected_viewer_path = saved_viewer_path
+        self._init_viewer_combo_selection(saved_viewer_path, saved["viewer_label"])
+
+    def _init_viewer_combo_selection(self, viewer_path: str, viewer_label: str):
+        if viewer_path and os.path.isfile(viewer_path):
+            label = viewer_label or os.path.splitext(os.path.basename(viewer_path))[0]
+            # 감지 목록에 없는(예: 직접 찾아보기로 고른) 프로그램이면 목록에 추가해둔다.
+            if not any(p == viewer_path for _, p in self.viewer_choices):
+                self.viewer_choices.append((label, viewer_path))
+                values = list(self.viewer_combo["values"])
+                values.insert(-1, label)
+                self.viewer_combo["values"] = values
+            self.viewer_var.set(label)
+            self.viewer_status_label.config(text=f"선택됨: {label} ({viewer_path})")
+        else:
+            self.viewer_var.set("(자동) FastStone → 탐색기")
+            self.viewer_status_label.config(text="자동 모드 - FastStone Image Viewer가 있으면 사용, 없으면 탐색기")
 
     # ------------------------------------------------------------------
     # 파일 입력
@@ -1523,6 +1707,47 @@ class DedupApp:
         except Exception:
             pass
         self._update_watch_status_label(False, folder)
+
+    # ------------------------------------------------------------------
+    # 이미지 도구 선택 (결과 폴더를 열 때 쓸 프로그램)
+    # ------------------------------------------------------------------
+    def _on_viewer_combo_change(self, _event=None):
+        choice = self.viewer_var.get()
+        if choice == self._viewer_browse_label:
+            path = filedialog.askopenfilename(
+                title="이미지 뷰어 프로그램(.exe) 선택",
+                filetypes=[("실행 파일", "*.exe")],
+            )
+            if not path:
+                # 취소했으면 이전 선택 상태로 되돌린다.
+                self._init_viewer_combo_selection(self._selected_viewer_path, "")
+                return
+            # filedialog가 슬래시(/)가 섞인 경로를 돌려줄 수 있으므로 정규화한다
+            # (zip/감시 폴더 경로에서 이미 겪은 것과 같은 문제를 미리 방지).
+            path = os.path.normpath(path)
+            label = os.path.splitext(os.path.basename(path))[0]
+            if not any(p == path for _, p in self.viewer_choices):
+                self.viewer_choices.append((label, path))
+                values = list(self.viewer_combo["values"])
+                values.insert(-1, label)
+                self.viewer_combo["values"] = values
+            self.viewer_var.set(label)
+
+    def _on_save_viewer_settings(self):
+        choice = self.viewer_var.get()
+        if choice in ("(자동) FastStone → 탐색기", self._viewer_browse_label, ""):
+            path, label = "", ""
+        else:
+            path = next((p for lbl, p in self.viewer_choices if lbl == choice), "")
+            label = choice if path else ""
+        self._selected_viewer_path = path
+        app_settings.save_settings({"viewer_path": path, "viewer_label": label})
+        if path:
+            self.viewer_status_label.config(text=f"선택됨: {label} ({path})")
+            messagebox.showinfo(APP_TITLE, f"이제부터 결과 폴더를 '{label}'(으)로 엽니다.")
+        else:
+            self.viewer_status_label.config(text="자동 모드 - FastStone Image Viewer가 있으면 사용, 없으면 탐색기")
+            messagebox.showinfo(APP_TITLE, "자동 모드로 저장했습니다. (FastStone → 탐색기 순으로 자동 실행)")
 
     def _start_watch_internal(self, folder: str):
         self._stop_watch_internal()
@@ -1812,9 +2037,22 @@ class DedupApp:
                 subprocess.Popen(["xdg-open", path])
 
     def _open_result_viewer(self, path: str):
-        """결과 폴더를 FastStone Image Viewer로 열어본다. 설치돼 있지 않으면 탐색기로 대신 연다."""
+        """결과 폴더를 "이미지 도구 선택"에서 고른 프로그램으로 열어본다.
+
+        아무것도 선택하지 않았으면(기본값) 기존 그대로 FastStone Image Viewer를 시도하고,
+        그것도 없으면 탐색기로 대신 연다 - "5. 이미지 도구 선택"이 생기기 전의 동작과 완전히
+        동일하다.
+        """
         if not os.path.isdir(path):
             return
+        viewer_path = app_settings.load_settings().get("viewer_path", "")
+        viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
+        if viewer_path and os.path.isfile(viewer_path):
+            try:
+                subprocess.Popen([viewer_path, path])
+                return
+            except Exception:
+                pass
         faststone = find_faststone_exe()
         if faststone:
             try:
@@ -2442,7 +2680,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.1.7.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.2.1.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2457,7 +2695,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.1.7"
+#define MyAppVersion "1.2.1"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -2793,6 +3031,14 @@ installer_output\PhotoDedup_Setup_1.1.7.exe
   Windows가 그 창을 최소화 상태로 띄워버려 화면에 전혀 안 보였음 - `_on_edit_order()`에서
   OrderEditor를 만들기 직전/직후로 메인 창을 아주 잠깐 보통 상태로 돌렸다가 다시 숨기는
   방식으로 해결함. 9-13번 트러블슈팅 참고.)
+- **(v1.2.0 추가)** "5. 이미지 도구 선택"에서 결과 폴더를 열 때 쓸 프로그램을 고를 수 있다.
+  `app/viewers.py`가 .jpg/.png 확장자의 레지스트리 연결 정보(기본 프로그램 + "다른 앱으로
+  열기" 후보)로 후보 목록을 만들고, 콤보박스 맨 아래 "찾아보기로 직접 선택..."으로 레지스트리에
+  안 잡히는 프로그램(예: 설치 없이 폴더로 실행하는 프로그램)도 `.exe`를 직접 골라 등록할 수
+  있다. 선택하면 `_open_result_viewer()`가 **그 프로그램으로만** 결과 폴더를 열고, 아무것도
+  선택하지 않았으면 기존 그대로 FastStone → 탐색기 순서다. **주의**: 등록하는 프로그램이
+  실행 시 인자로 받은 폴더 경로를 스스로 자동으로 열지 않으면(FastStone은 원래 이렇게
+  동작함) 화면이 빈 채로 뜬다 - 9-16번 참고.
 
 ### 9-15. (v1.1.7에서 발견/수정, 실사용 중 실제 발생) 오랫동안 켜둔 감시가 새 zip을 더 이상 감지하지 못함
 - **증상**: 감시를 켠 채로(트레이 상주) 18시간 넘게 계속 실행 중이던 프로그램이, 그 폴더에
@@ -2822,6 +3068,28 @@ installer_output\PhotoDedup_Setup_1.1.7.exe
   이 세션에서는 원인을 코드 리뷰로 추론하고 수정한 뒤, 짧은 재현 테스트로는 "고친 뒤에도
   정상 동작하는지"만 확인했다 - 실제로 며칠 이상 켜두고 감시가 계속 반응하는지는 향후
   사용 중 추가로 지켜봐야 한다.
+
+### 9-16. (v1.2.0, 실사용 중 실제 발생) "이미지 도구 선택"으로 지정한 프로그램이 결과 폴더를 빈 화면으로 엶
+- **증상**: "5. 이미지 도구 선택"에서 FastImageAnnotator(사용자가 직접 만든 별도 Electron
+  뷰어 프로그램, `C:\Users\MYCOM\Desktop\Kim's programe\10. FastImageAnnotator`)를 등록하고
+  확정했더니, 그 프로그램 창은 뜨는데 사진이 하나도 안 보이고 화면이 비어 있었음.
+- **원인**: PhotoDedup 쪽 문제가 아니었다. `_open_result_viewer()`는 `subprocess.Popen([그
+  프로그램 경로, 결과폴더경로])`로 폴더 경로를 **명령줄 인자**로 넘겨서 실행하는데(FastStone도
+  똑같이 이렇게 열림), FastImageAnnotator의 Electron 메인 프로세스(`electron/main.js`)는
+  `process.argv`를 전혀 확인하지 않고 항상 빈 상태로 시작해서, 사람이 앱 안에서 직접
+  "📁 폴더 열기" 버튼을 눌러야만 사진이 로드되는 구조였다 - 인자로 넘어온 폴더를 자동으로
+  열어주는 로직 자체가 없었던 것.
+- **해결(FastImageAnnotator 쪽 수정, PhotoDedup 저장소 밖의 별도 프로젝트)**:
+  `electron/main.js`에 `resolveLaunchFolder()`를 추가해 `process.argv`에서 실제 존재하는
+  폴더 인자를 찾고, 창이 `did-finish-load`된 직후 `win.webContents.send('open-folder', 그
+  폴더)`로 렌더러에 알린다. `electron/preload.js`에 `onOpenFolder(callback)`을 추가로
+  노출하고, `src/App.jsx`에서 마운트 시 이를 구독해 기존 "폴더 열기" 버튼이 쓰던 것과 동일한
+  `useExplorerStore().openFolder(folderPath)`를 호출하도록 연결함 - 즉 "사람이 폴더 버튼을
+  누른 것"과 완전히 동일한 경로를 자동으로 한 번 더 타게 만든 것뿐, 새로운 로딩 로직을
+  만들지 않았다.
+- **교훈**: "이미지 도구 선택"에 등록하는 프로그램은 **명령줄 인자로 받은 폴더를 시작 시
+  자동으로 여는 기능이 있어야** 한다. FastStone은 원래 그렇게 동작해서 문제가 없었을 뿐이고,
+  이 기능 자체가 "아무 프로그램이나 폴더를 넘기면 알아서 열린다"를 보장하지는 않는다.
 
 ### 9-14. (v1.1.6에서 발견/수정, 실사용 중 실제 발생) 확정 후 zip은 실제로 존재하는데 "지정된 경로를 찾을 수 없습니다"라며 삭제 실패
 - **증상**: "최종 결과폴더로 보내기" 확정 후 `일부 zip 삭제 실패: <파일명>: [Errno 3] 지정된

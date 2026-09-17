@@ -30,6 +30,7 @@ from . import settings as app_settings
 from . import singleinstance as app_singleinstance
 from . import startup as app_startup
 from . import tray as app_tray
+from . import viewers as app_viewers
 from . import watcher as app_watcher
 
 APP_TITLE = "중복 사진 정리 도구"
@@ -83,8 +84,8 @@ class DedupApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("760x920")
-        self.root.minsize(700, 860)
+        self.root.geometry("760x1080")
+        self.root.minsize(700, 1000)
 
         self.zip_paths: list[str] = []
         self.last_zip_paths: list[str] = []  # 처리에 실제로 사용된 zip 경로(목록이 나중에 바뀌어도 유지)
@@ -208,7 +209,7 @@ class DedupApp:
         self.log_text.pack(fill="both", expand=True, pady=(8, 0))
 
         # 파일자동읽기 폴더지정 (지정 폴더에 zip이 들어오면 자동으로 처리 시작)
-        watch_frame = tk.LabelFrame(self.root, text="파일자동읽기 폴더지정", padx=8, pady=8)
+        watch_frame = tk.LabelFrame(self.root, text="4. 파일자동읽기 폴더지정", padx=8, pady=8)
         watch_frame.pack(fill="x", **pad)
 
         tk.Label(
@@ -237,6 +238,58 @@ class DedupApp:
         ).pack(side="right", padx=(0, 6))
 
         self._update_watch_status_label(saved["watch_enabled"], saved["watch_folder"])
+
+        # 이미지 도구 선택 (결과 폴더를 열 때 쓸 프로그램 - FastStone 대신 다른 뷰어도 지정 가능)
+        viewer_frame = tk.LabelFrame(self.root, text="5. 이미지 도구 선택", padx=8, pady=8)
+        viewer_frame.pack(fill="x", **pad)
+
+        tk.Label(
+            viewer_frame,
+            text="\"최종 결과폴더로 보내기\" 확정 뒤 결과 폴더를 열어줄 프로그램을 고르세요.\n"
+                 "(선택하지 않으면 기존처럼 FastStone Image Viewer → 없으면 탐색기 순으로 자동 실행됩니다)",
+            fg="#555555", justify="left",
+        ).pack(anchor="w")
+
+        self.viewer_choices: list[tuple[str, str]] = app_viewers.detect_viewers()
+        self._viewer_browse_label = "찾아보기로 직접 선택..."
+        combo_values = ["(자동) FastStone → 탐색기"] + [label for label, _ in self.viewer_choices] + [self._viewer_browse_label]
+
+        viewer_row = tk.Frame(viewer_frame)
+        viewer_row.pack(fill="x", pady=(8, 0))
+        self.viewer_var = tk.StringVar()
+        self.viewer_combo = ttk.Combobox(
+            viewer_row, textvariable=self.viewer_var, values=combo_values, state="readonly",
+        )
+        self.viewer_combo.pack(side="left", fill="x", expand=True)
+        self.viewer_combo.bind("<<ComboboxSelected>>", self._on_viewer_combo_change)
+
+        viewer_btn_row = tk.Frame(viewer_frame)
+        viewer_btn_row.pack(fill="x", pady=(6, 0))
+        self.viewer_status_label = tk.Label(viewer_btn_row, text="", fg="#555555", anchor="w")
+        self.viewer_status_label.pack(side="left", fill="x", expand=True)
+        tk.Button(
+            viewer_btn_row, text="저장", command=self._on_save_viewer_settings,
+            bg="#2f7dd1", fg="white",
+        ).pack(side="right")
+
+        saved_viewer_path = os.path.normpath(saved["viewer_path"]) if saved["viewer_path"] else ""
+        self._selected_viewer_path = saved_viewer_path
+        self._init_viewer_combo_selection(saved_viewer_path, saved["viewer_label"])
+
+    def _init_viewer_combo_selection(self, viewer_path: str, viewer_label: str):
+        if viewer_path and os.path.isfile(viewer_path):
+            label = viewer_label or os.path.splitext(os.path.basename(viewer_path))[0]
+            # 감지 목록에 없는(예: 직접 찾아보기로 고른) 프로그램이면 목록에 추가해둔다.
+            if not any(p == viewer_path for _, p in self.viewer_choices):
+                self.viewer_choices.append((label, viewer_path))
+                values = list(self.viewer_combo["values"])
+                values.insert(-1, label)
+                self.viewer_combo["values"] = values
+            self.viewer_var.set(label)
+            self.viewer_status_label.config(text=f"선택됨: {label} ({viewer_path})")
+        else:
+            self.viewer_var.set("(자동) FastStone → 탐색기")
+            self.viewer_status_label.config(text="자동 모드 - FastStone Image Viewer가 있으면 사용, 없으면 탐색기")
 
     # ------------------------------------------------------------------
     # 파일 입력
@@ -331,6 +384,47 @@ class DedupApp:
         except Exception:
             pass
         self._update_watch_status_label(False, folder)
+
+    # ------------------------------------------------------------------
+    # 이미지 도구 선택 (결과 폴더를 열 때 쓸 프로그램)
+    # ------------------------------------------------------------------
+    def _on_viewer_combo_change(self, _event=None):
+        choice = self.viewer_var.get()
+        if choice == self._viewer_browse_label:
+            path = filedialog.askopenfilename(
+                title="이미지 뷰어 프로그램(.exe) 선택",
+                filetypes=[("실행 파일", "*.exe")],
+            )
+            if not path:
+                # 취소했으면 이전 선택 상태로 되돌린다.
+                self._init_viewer_combo_selection(self._selected_viewer_path, "")
+                return
+            # filedialog가 슬래시(/)가 섞인 경로를 돌려줄 수 있으므로 정규화한다
+            # (zip/감시 폴더 경로에서 이미 겪은 것과 같은 문제를 미리 방지).
+            path = os.path.normpath(path)
+            label = os.path.splitext(os.path.basename(path))[0]
+            if not any(p == path for _, p in self.viewer_choices):
+                self.viewer_choices.append((label, path))
+                values = list(self.viewer_combo["values"])
+                values.insert(-1, label)
+                self.viewer_combo["values"] = values
+            self.viewer_var.set(label)
+
+    def _on_save_viewer_settings(self):
+        choice = self.viewer_var.get()
+        if choice in ("(자동) FastStone → 탐색기", self._viewer_browse_label, ""):
+            path, label = "", ""
+        else:
+            path = next((p for lbl, p in self.viewer_choices if lbl == choice), "")
+            label = choice if path else ""
+        self._selected_viewer_path = path
+        app_settings.save_settings({"viewer_path": path, "viewer_label": label})
+        if path:
+            self.viewer_status_label.config(text=f"선택됨: {label} ({path})")
+            messagebox.showinfo(APP_TITLE, f"이제부터 결과 폴더를 '{label}'(으)로 엽니다.")
+        else:
+            self.viewer_status_label.config(text="자동 모드 - FastStone Image Viewer가 있으면 사용, 없으면 탐색기")
+            messagebox.showinfo(APP_TITLE, "자동 모드로 저장했습니다. (FastStone → 탐색기 순으로 자동 실행)")
 
     def _start_watch_internal(self, folder: str):
         self._stop_watch_internal()
@@ -620,9 +714,22 @@ class DedupApp:
                 subprocess.Popen(["xdg-open", path])
 
     def _open_result_viewer(self, path: str):
-        """결과 폴더를 FastStone Image Viewer로 열어본다. 설치돼 있지 않으면 탐색기로 대신 연다."""
+        """결과 폴더를 "이미지 도구 선택"에서 고른 프로그램으로 열어본다.
+
+        아무것도 선택하지 않았으면(기본값) 기존 그대로 FastStone Image Viewer를 시도하고,
+        그것도 없으면 탐색기로 대신 연다 - "5. 이미지 도구 선택"이 생기기 전의 동작과 완전히
+        동일하다.
+        """
         if not os.path.isdir(path):
             return
+        viewer_path = app_settings.load_settings().get("viewer_path", "")
+        viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
+        if viewer_path and os.path.isfile(viewer_path):
+            try:
+                subprocess.Popen([viewer_path, path])
+                return
+            except Exception:
+                pass
         faststone = find_faststone_exe()
         if faststone:
             try:
