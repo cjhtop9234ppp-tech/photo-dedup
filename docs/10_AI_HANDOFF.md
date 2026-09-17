@@ -138,6 +138,16 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
     (v1.2.0에서는 번호 없음/4번으로 어긋나 있었음). 번호를 바꿀 땐 두 `tk.LabelFrame`의
     `text=` 문자열을 함께 맞출 것
 
+25. (v1.2.2부터) `_open_result_viewer()`는 새 뷰어를 열기 전에 반드시
+    `_close_previous_viewer()`로 직전에 띄운 뷰어 프로세스를 먼저 종료해야 한다 -
+    사용자가 명시적으로 요청한 동작이다("이전 뷰어를 보고 있는 중에 또 다른 zip이 처리되면
+    이전 창은 닫고 새 창만 남았으면 좋겠다"). `taskkill /F /T /PID`로 프로세스 트리 전체를
+    끄는 이유: FastImageAnnotator 같은 Electron 프로그램은 대표 프로세스 하나만 끄면
+    GPU/렌더러 자식 프로세스가 고아로 남을 수 있다. 이 종료 로직은 `self._viewer_process`에
+    기록된, PhotoDedup이 직접 띄운 프로세스에만 적용되며 탐색기(`_open_in_explorer`,
+    `os.startfile` 사용)에는 적용되지 않는다 - 탐색기는 여러 창이 공유하는 프로세스라서
+    잘못 건드리면 사용자의 다른 탐색기 창까지 전부 닫힐 위험이 있다
+
 24. (v1.2.1부터) "이미지 도구 선택"으로 고른 뷰어가 결과 폴더를 열었을 때 화면이 비어
     보이는 문제가 실제로 있었다(FastImageAnnotator로 확인) - 원인은 PhotoDedup이 아니라
     그 뷰어 프로그램 쪽에 있었다: `subprocess.Popen([viewer_path, 폴더경로])`로 폴더 경로를

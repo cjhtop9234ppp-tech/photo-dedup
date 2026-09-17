@@ -1418,6 +1418,7 @@ class DedupApp:
         self.worker_thread: threading.Thread | None = None
         self.thumb_cache: list = []  # PhotoImage 참조 유지용
         self._auto_open_order_editor = False  # 자동 실행 모드에서 처리 끝나면 순서 정리 창까지 자동으로 열지 여부
+        self._viewer_process: subprocess.Popen | None = None  # _open_result_viewer()가 마지막으로 띄운 뷰어 프로세스
 
         # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
         self.folder_watcher: app_watcher.FolderWatcher | None = None
@@ -2042,25 +2043,53 @@ class DedupApp:
         아무것도 선택하지 않았으면(기본값) 기존 그대로 FastStone Image Viewer를 시도하고,
         그것도 없으면 탐색기로 대신 연다 - "5. 이미지 도구 선택"이 생기기 전의 동작과 완전히
         동일하다.
+
+        직전에 이 방식으로 띄운 뷰어 창이 아직 떠 있으면(예: FastImageAnnotator를 보고 있는
+        중에 또 다른 zip이 자동으로 처리된 경우), 새 결과 폴더를 열기 전에 그 창을 먼저
+        닫는다 - 이전 폴더를 보여주던 창과 새 폴더를 보여주는 창이 여러 개 쌓이지 않게
+        하기 위함. 뷰어 프로그램 자체의 창 위치/크기 등 설정은 그 프로그램이 스스로
+        저장/복원하므로(예: FastImageAnnotator의 windowState.js) 새로 뜬 창에도 그대로
+        적용된다 - PhotoDedup은 여기서 그 설정을 따로 다루지 않는다.
         """
         if not os.path.isdir(path):
             return
+        self._close_previous_viewer()
         viewer_path = app_settings.load_settings().get("viewer_path", "")
         viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
         if viewer_path and os.path.isfile(viewer_path):
             try:
-                subprocess.Popen([viewer_path, path])
+                self._viewer_process = subprocess.Popen([viewer_path, path])
                 return
             except Exception:
                 pass
         faststone = find_faststone_exe()
         if faststone:
             try:
-                subprocess.Popen([faststone, path])
+                self._viewer_process = subprocess.Popen([faststone, path])
                 return
             except Exception:
                 pass
         self._open_in_explorer(path)
+
+    def _close_previous_viewer(self):
+        """지난번에 _open_result_viewer()로 띄운 뷰어 프로세스가 아직 살아있으면 닫는다.
+
+        taskkill /T(프로세스 트리 전체)를 쓰는 이유: FastImageAnnotator 같은 Electron
+        프로그램은 메인 창 하나를 띄워도 내부적으로 GPU/렌더러 등 자식 프로세스를 여러 개
+        만드는데, 대표 프로세스(Popen이 반환한 PID)만 끄면 이 자식들이 고아 프로세스로
+        남을 수 있다. 이미 저절로 종료된 경우(poll()이 None이 아님)는 아무것도 하지 않는다.
+        """
+        proc = self._viewer_process
+        self._viewer_process = None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, check=False,
+            )
+        except Exception:
+            pass
 
     def _on_edit_order(self):
         if not self.result or not os.path.isdir(self.result.output_dir):
@@ -2680,7 +2709,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.2.1.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.2.2.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2695,7 +2724,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.2"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -3039,6 +3068,11 @@ installer_output\PhotoDedup_Setup_1.1.7.exe
   선택하지 않았으면 기존 그대로 FastStone → 탐색기 순서다. **주의**: 등록하는 프로그램이
   실행 시 인자로 받은 폴더 경로를 스스로 자동으로 열지 않으면(FastStone은 원래 이렇게
   동작함) 화면이 빈 채로 뜬다 - 9-16번 참고.
+- **(v1.2.2 추가)** `_open_result_viewer()`가 새 뷰어를 열기 전에 직전에 띄운 뷰어
+  프로세스를 `_close_previous_viewer()`로 먼저 종료한다(`taskkill /F /T /PID`로 프로세스
+  트리 전체 종료) - 감시로 zip을 여러 번 자동 처리할 때, FastImageAnnotator 같은 뷰어 창이
+  하나씩 계속 쌓이지 않고 항상 최신 결과 폴더를 보여주는 창 하나만 남는다. 탐색기로 여는
+  경우는 해당 없음(공유 프로세스라 건드리지 않음).
 
 ### 9-15. (v1.1.7에서 발견/수정, 실사용 중 실제 발생) 오랫동안 켜둔 감시가 새 zip을 더 이상 감지하지 못함
 - **증상**: 감시를 켠 채로(트레이 상주) 18시간 넘게 계속 실행 중이던 프로그램이, 그 폴더에
