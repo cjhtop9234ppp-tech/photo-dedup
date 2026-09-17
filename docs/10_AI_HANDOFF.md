@@ -105,6 +105,22 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
     처럼 슬래시가 섞인 경로가 만들어지고, `send2trash()`의 Windows 레거시 백엔드가 이런
     경로에서는 파일이 실제로 있어도 `[Errno 3] 지정된 경로를 찾을 수 없습니다` 오류를 내며
     zip 삭제에 실패한다(실사용 중 실제 발생 확인). 이 정규화를 하나라도 제거하면 재발한다
+
+18. (v1.1.7부터) `app/watcher.py`의 `FolderWatcher`, `app/singleinstance.py`의
+    `PendingRequestWatcher`는 백그라운드 스레드에서 실행되는데, 이 스레드들의 콜백
+    (`_on_watcher_new_zip`, `_on_external_request`)은 절대 `root.after()`나 다른 tkinter
+    위젯을 직접 호출하면 안 되고, `self._watcher_events` 큐(`queue.Queue`)에 이벤트를
+    넣기만 해야 한다 - 실제 위젯 조작은 메인 루프에서 주기적으로 도는
+    `_poll_watcher_events()`가 큐를 비우면서 처리한다. tkinter는 스레드 안전하지 않아서
+    백그라운드 스레드가 `root.after()`를 직접 반복 호출하면 오래 켜둘수록(며칠 단위 감시)
+    이벤트가 조용히 씹히거나 감시가 멈춘 것처럼 보이는 문제가 있었다(실사용 중 발견 -
+    18시간 이상 켜둔 뒤 새 zip을 감지하지 못함). 처리 스레드(`worker_thread`)가 이미 쓰고
+    있던 `self.progress_queue` + `_poll_queue()` 패턴과 반드시 동일하게 유지할 것
+
+19. (v1.1.7부터) `_start_watch_internal()`이 예약하는 `_check_watcher_alive()`(60초마다
+    `FolderWatcher.is_alive()` 확인 후 죽어 있으면 같은 폴더로 재시작)를 지우지 말 것 -
+    18번 항목의 근본 원인을 완전히 배제할 수 없으므로, 감시 스레드가 어떤 이유로든 멈추더라도
+    최대 60초 안에 스스로 복구되게 하는 마지막 안전장치다
 ```
 
 ## 주요 파일

@@ -97,9 +97,16 @@ class DedupApp:
 
         # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
         self.folder_watcher: app_watcher.FolderWatcher | None = None
+        self._watch_folder_current: str | None = None  # 감시 스레드가 죽었을 때 재시작할 폴더
         self.tray_icon = None
         self._watch_pending: list[tuple[str, bool]] = []  # (zip 경로, silent 여부) 대기열
         self._order_editor_open = False
+
+        # 백그라운드 스레드(FolderWatcher/PendingRequestWatcher)는 tkinter 위젯을 직접 건드리면
+        # 안 되므로(스레드 안전하지 않음 - 특히 root.after()를 다른 스레드에서 계속 호출하면
+        # 장시간 실행 시 이벤트가 유실되거나 스레드가 조용히 멈출 위험이 있다), 다른 작업
+        # 스레드(worker_thread)와 동일하게 큐에만 넣고 메인 루프가 주기적으로 꺼내 처리한다.
+        self._watcher_events: "queue.Queue" = queue.Queue()
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -109,6 +116,7 @@ class DedupApp:
         # 넘겨받는 요청(zip 열기/창 보여주기)이 있는지 계속 확인한다.
         self.pending_request_watcher = app_singleinstance.PendingRequestWatcher(self._on_external_request)
         self.pending_request_watcher.start()
+        self.root.after(300, self._poll_watcher_events)
 
     # ------------------------------------------------------------------
     # UI 구성
@@ -326,13 +334,31 @@ class DedupApp:
 
     def _start_watch_internal(self, folder: str):
         self._stop_watch_internal()
+        self._watch_folder_current = folder
         self.folder_watcher = app_watcher.FolderWatcher(folder, self._on_watcher_new_zip)
         self.folder_watcher.start()
+        self.root.after(60_000, self._check_watcher_alive)
 
     def _stop_watch_internal(self):
+        self._watch_folder_current = None
         if self.folder_watcher is not None:
             self.folder_watcher.stop()
             self.folder_watcher = None
+
+    def _check_watcher_alive(self):
+        """감시 스레드가 무슨 이유로든 죽어 있으면 같은 폴더로 자동으로 다시 시작한다.
+
+        FolderWatcher.run()은 예외를 계속 삼키도록 만들어져 있지만, 장시간 켜두는 프로그램
+        특성상 예상 못한 이유로 스레드가 멈출 가능성 자체를 완전히 배제할 수는 없다 - 감시가
+        조용히 멈춘 채로 며칠씩 방치되는 것을 막기 위한 마지막 안전장치다.
+        """
+        if self.folder_watcher is not None and not self.folder_watcher.is_alive():
+            folder = self._watch_folder_current
+            if folder and os.path.isdir(folder):
+                self._start_watch_internal(folder)
+                return  # _start_watch_internal이 다음 after()를 다시 예약한다
+        if self.folder_watcher is not None:
+            self.root.after(60_000, self._check_watcher_alive)
 
     def _maybe_resume_watch(self):
         """이전에 저장해 둔 감시 설정이 켜져 있으면(예: Windows 시작 시 자동 실행) 다시 감시를 시작한다."""
@@ -345,7 +371,9 @@ class DedupApp:
 
     def _on_watcher_new_zip(self, zip_path: str):
         # 이 콜백은 감시 스레드에서 호출되므로, tkinter 위젯 조작은 반드시 메인 스레드로 넘긴다.
-        self.root.after(0, lambda: self._handle_watched_zip(zip_path))
+        # root.after()를 스레드에서 직접 부르는 대신 큐에 넣기만 하고, 메인 루프의
+        # _poll_watcher_events()가 꺼내서 처리한다(자세한 이유는 __init__ 주석 참고).
+        self._watcher_events.put(("watched_zip", zip_path))
 
     def _handle_watched_zip(self, zip_path: str):
         # 감시 폴더에서 자동으로 감지한 zip은 창을 띄우지 않고 조용히 처리한다(v1.1.2부터).
@@ -367,8 +395,25 @@ class DedupApp:
     # 단일 인스턴스: 이미 실행 중일 때 또 실행하려던 요청(zip 열기/창 보여주기) 처리
     # ------------------------------------------------------------------
     def _on_external_request(self, zip_paths: list[str]):
-        # 이 콜백은 감시 스레드에서 호출되므로, tkinter 위젯 조작은 반드시 메인 스레드로 넘긴다.
-        self.root.after(0, lambda: self._handle_external_request(zip_paths))
+        # 이 콜백도 감시 스레드에서 호출되므로 마찬가지로 큐에만 넣는다.
+        self._watcher_events.put(("external_request", zip_paths))
+
+    def _poll_watcher_events(self):
+        """백그라운드 스레드(FolderWatcher/PendingRequestWatcher)가 큐에 넣은 이벤트를
+        메인 루프에서 안전하게 꺼내 처리한다. tkinter는 스레드 안전하지 않아서, 백그라운드
+        스레드가 root.after()/위젯을 직접 건드리면 오래 켜둘수록(장시간 감시) 이벤트가
+        조용히 씹히거나 감시가 멈추는 것처럼 보일 수 있다 - 처리 스레드(worker_thread)와
+        동일하게 큐 + 주기적 폴링 패턴으로 통일한다."""
+        try:
+            while True:
+                kind, payload = self._watcher_events.get_nowait()
+                if kind == "watched_zip":
+                    self._handle_watched_zip(payload)
+                elif kind == "external_request":
+                    self._handle_external_request(payload)
+        except queue.Empty:
+            pass
+        self.root.after(300, self._poll_watcher_events)
 
     def _handle_external_request(self, zip_paths: list[str]):
         # 사람이 직접 바탕화면 아이콘/트레이 아이콘을 더블클릭했거나 탐색기에서 zip을 열려고 한
