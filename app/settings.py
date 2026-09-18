@@ -20,6 +20,7 @@ DEFAULTS = {
     "watch_enabled": False,
     "viewer_path": "",  # 비어있으면 기존 동작(FastStone 자동 감지 → 없으면 탐색기) 그대로
     "viewer_label": "",
+    "order_editor_thumb_size": "",  # "사진 순서 정리" 창의 아이콘 크기(예: "보통 아이콘"), 비어있으면 기본값
 }
 
 

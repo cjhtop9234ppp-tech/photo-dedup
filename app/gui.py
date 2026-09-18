@@ -939,6 +939,18 @@ class OrderEditor:
     NORMAL_BORDER = "#cccccc"
     SELECTED_BORDER = "#2f7dd1"
     DROP_TARGET_BORDER = "#ff9800"
+    MOVED_BORDER = "#ffc107"  # 방금 순서를 옮긴 사진에 잠깐 표시하는 노란 테두리
+
+    # "보기" 콤보박스에서 고를 수 있는 아이콘 크기 (라벨 -> 썸네일 한 변 픽셀)
+    THUMB_SIZE_OPTIONS = {
+        "작은 아이콘": 90,
+        "보통 아이콘": 115,
+        "큰 아이콘": 160,
+        "매우 큰 아이콘": 220,
+        "매우 가장 중간 큰 아이콘": 330,
+        "가장 큰 아이콘": 440,
+    }
+    DEFAULT_THUMB_SIZE_LABEL = "보통 아이콘"
 
     def __init__(self, app: DedupApp, items: list, source_zip_paths: list | None = None):
         self.app = app
@@ -948,8 +960,11 @@ class OrderEditor:
         self.selected: set = set()
         self.anchor_item = None  # shift-클릭 범위 선택의 기준점
         self.hover_item = None  # 드래그 중 마우스 아래 있는 삽입 대상(미리보기 표시용)
+        self._recently_moved: set = set()  # 방금 옮겨서 노란 테두리로 표시 중인 사진들
         self.thumb_cache: list = []  # PhotoImage 참조 유지용(가비지 컬렉션 방지)
         self.thumb_images: dict = {}  # id(item) -> PhotoImage (한 번만 생성, 재사용)
+        self.thumb_labels: dict = {}  # id(item) -> 썸네일 Label (아이콘 크기 변경 시 이미지 교체용)
+        self.name_labels: dict = {}  # id(item) -> 파일명 Label (아이콘 크기 변경 시 줄바꿈 폭 갱신용)
         self.cells: dict = {}  # id(item) -> 셀 Frame (한 번만 생성, 재사용)
         self.badges: dict = {}  # id(item) -> 순번 배지 Label
         self.deleted_items: list = []  # Delete 키로 제외 표시된 사진(확정 시 실제로 삭제됨)
@@ -959,6 +974,14 @@ class OrderEditor:
         self.dragging = False
         self._shift_held = False
         self.columns = self.COLUMNS_MIN
+        self.preview_win = None  # 더블클릭으로 연 사진 미리보기 창(하나만 유지)
+
+        saved_label = app_settings.load_settings().get("order_editor_thumb_size", "")
+        if saved_label not in self.THUMB_SIZE_OPTIONS:
+            saved_label = self.DEFAULT_THUMB_SIZE_LABEL
+        self._thumb_size_label = saved_label
+        px = self.THUMB_SIZE_OPTIONS[saved_label]
+        self.THUMB_SIZE = (px, px)  # 클래스 기본값을 인스턴스 값으로 가림(다른 창에 영향 없음)
 
         self.win = tk.Toplevel(app.root)
         self.win.title("사진 순서 정리")
@@ -995,7 +1018,8 @@ class OrderEditor:
         tk.Label(
             top,
             text="사진을 클릭해 선택(Shift+클릭으로 범위 선택)한 뒤 '선택 위로/아래로' 버튼이나 "
-                 "마우스 드래그로 순서를 바꾸세요.\nDelete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소",
+                 "마우스 드래그로 순서를 바꾸세요. 더블클릭하면 크게 볼 수 있습니다.\n"
+                 "Delete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소",
             fg="#555555", justify="left",
         ).pack(side="left")
 
@@ -1009,6 +1033,17 @@ class OrderEditor:
             btn_frame, text="최종 결과폴더로 보내기", command=self._confirm,
             bg="#2f7dd1", fg="white", font=("", 10, "bold"),
         ).pack(side="left", padx=(12, 0))
+
+        view_row = tk.Frame(self.win, padx=10)
+        view_row.pack(fill="x")
+        tk.Label(view_row, text="보기:").pack(side="left")
+        self.thumb_size_var = tk.StringVar(value=self._thumb_size_label)
+        self.thumb_size_combo = ttk.Combobox(
+            view_row, textvariable=self.thumb_size_var, state="readonly",
+            values=list(self.THUMB_SIZE_OPTIONS.keys()), width=20,
+        )
+        self.thumb_size_combo.pack(side="left", padx=(6, 0))
+        self.thumb_size_combo.bind("<<ComboboxSelected>>", self._on_thumb_size_change)
 
         self.status_label = tk.Label(self.win, text="", anchor="w", padx=10)
         self.status_label.pack(fill="x")
@@ -1061,19 +1096,108 @@ class OrderEditor:
         else:
             thumb_label = tk.Label(cell, text="(미리보기 실패)", width=18, height=8, bg="white")
         thumb_label.pack()
+        self.thumb_labels[id(item)] = thumb_label
 
         name_label = tk.Label(
             cell, text=item.output_name or item.display_name, wraplength=self.THUMB_SIZE[0], bg="white",
         )
         name_label.pack()
+        self.name_labels[id(item)] = name_label
 
         for w in (cell, badge, thumb_label, name_label):
             w.item_ref = item
             w.bind("<ButtonPress-1>", self._on_press)
             w.bind("<B1-Motion>", self._on_motion)
             w.bind("<ButtonRelease-1>", self._on_release)
+            w.bind("<Double-Button-1>", self._on_double_click)
 
         return cell, badge
+
+    # ------------------------------------------------------------------
+    # 보기 크기 변경 ("보기: 작은 아이콘" ~ "가장 큰 아이콘")
+    # ------------------------------------------------------------------
+    def _on_thumb_size_change(self, _event=None):
+        label = self.thumb_size_var.get()
+        px = self.THUMB_SIZE_OPTIONS.get(label)
+        if not px:
+            return
+        self._thumb_size_label = label
+        self.THUMB_SIZE = (px, px)
+        self._rebuild_thumbnails()
+        self._recompute_columns(force=True)
+        app_settings.save_settings({"order_editor_thumb_size": label})
+
+    def _rebuild_thumbnails(self):
+        """현재 self.THUMB_SIZE 크기로 썸네일을 다시 만들어 이미 떠 있는 셀들의 이미지를
+        교체한다(위젯을 새로 만들지 않고 이미지/줄바꿈 폭만 바꿔서 깜빡임을 줄인다)."""
+        self.thumb_cache.clear()
+        for item in self.items:
+            key = id(item)
+            try:
+                img = Image.open(item.extracted_path)
+                img.thumbnail(self.THUMB_SIZE)
+                photo = ImageTk.PhotoImage(img)
+            except Exception:
+                photo = None
+            self.thumb_images[key] = photo
+            label = self.thumb_labels.get(key)
+            if label is not None and photo is not None:
+                label.config(image=photo)
+                self.thumb_cache.append(photo)
+            name_label = self.name_labels.get(key)
+            if name_label is not None:
+                name_label.config(wraplength=self.THUMB_SIZE[0])
+
+    # ------------------------------------------------------------------
+    # 더블클릭 미리보기
+    # ------------------------------------------------------------------
+    def _on_double_click(self, event):
+        item = self._widget_item(event.widget)
+        if item is None:
+            return
+        self._show_preview(item)
+
+    def _show_preview(self, item: core.PhotoItem):
+        if self.preview_win is not None:
+            try:
+                self.preview_win.destroy()
+            except tk.TclError:
+                pass
+            self.preview_win = None
+        try:
+            img = Image.open(item.extracted_path)
+        except Exception:
+            messagebox.showwarning(APP_TITLE, "이 사진을 불러올 수 없습니다.")
+            return
+
+        win = tk.Toplevel(self.win)
+        win.title(item.output_name or item.display_name)
+        self.preview_win = win
+
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        max_w, max_h = int(sw * 0.85), int(sh * 0.85)
+        shown = img.copy()
+        shown.thumbnail((max_w, max_h))
+        photo = ImageTk.PhotoImage(shown)
+
+        label = tk.Label(win, image=photo, bg="black")
+        label.image = photo  # 참조 유지(가비지 컬렉션 방지)
+        label.pack(fill="both", expand=True)
+
+        x = (sw - shown.width) // 2
+        y = (sh - shown.height) // 2
+        win.geometry(f"{shown.width}x{shown.height}+{x}+{y}")
+
+        def close(_event=None):
+            if self.preview_win is win:
+                self.preview_win = None
+            win.destroy()
+
+        win.bind("<Escape>", close)
+        win.bind("<Double-Button-1>", close)
+        label.bind("<Double-Button-1>", close)
+        win.protocol("WM_DELETE_WINDOW", close)
+        win.focus_set()
 
     # ------------------------------------------------------------------
     # 배치 (창 크기에 맞춘 열 수 계산 + 재배치, 위젯은 그대로 재사용)
@@ -1120,6 +1244,7 @@ class OrderEditor:
         self.items, self.deleted_items = self.history.pop()
         self.selected.clear()
         self.anchor_item = None
+        self._recently_moved.clear()
         self._relayout()
         self._update_selection_visual()
 
@@ -1143,7 +1268,11 @@ class OrderEditor:
     # 선택 (클릭 토글 / Shift+클릭 범위 선택) - 위젯을 다시 만들지 않고 테두리 색만 갱신
     # ------------------------------------------------------------------
     def _border_color(self, item) -> str:
-        return self.SELECTED_BORDER if item in self.selected else self.NORMAL_BORDER
+        if item in self.selected:
+            return self.SELECTED_BORDER
+        if item in self._recently_moved:
+            return self.MOVED_BORDER
+        return self.NORMAL_BORDER
 
     def _set_cell_border(self, item, color: str):
         cell = self.cells.get(id(item))
@@ -1183,13 +1312,19 @@ class OrderEditor:
         if direction > 0 and idxs[-1] == len(self.items) - 1:
             return
         self._push_history()
+        moved_items = [self.items[i] for i in idxs]
         if direction < 0:
             for i in idxs:
                 self.items[i - 1], self.items[i] = self.items[i], self.items[i - 1]
         else:
             for i in reversed(idxs):
                 self.items[i + 1], self.items[i] = self.items[i], self.items[i + 1]
+        # 이동이 끝나면 선택은 풀고, 방금 옮긴 사진들만 노란 테두리로 잠깐 표시한다.
+        self._recently_moved = set(moved_items)
+        self.selected.clear()
+        self.anchor_item = None
         self._relayout()
+        self._update_selection_visual()
 
     # ------------------------------------------------------------------
     # 드래그 (선택된 사진 함께 이동 + 놓일 위치 실시간 표시)
@@ -1210,6 +1345,10 @@ class OrderEditor:
         self.drag_start = (event.x_root, event.y_root)
         self.dragging = False
         self._shift_held = bool(event.state & 0x0001)
+        if self._recently_moved:
+            # 새로운 클릭/드래그가 시작되면 직전 "방금 옮김" 노란 표시는 지운다.
+            self._recently_moved.clear()
+            self._update_selection_visual()
 
     def _on_motion(self, event):
         if self.drag_item is None or self.drag_start is None:
@@ -1265,7 +1404,13 @@ class OrderEditor:
         remaining = [it for it in self.items if it not in moving]
         target_pos = remaining.index(target_item)
         self.items = remaining[:target_pos] + moving_ordered + remaining[target_pos:]
+        # 드래그로 옮기고 나면 선택은 자동으로 풀고, 방금 옮긴 사진들만 노란 테두리로 표시한다
+        # (번호 배지는 그대로 새 순번을 보여준다 - _relayout이 매번 다시 매긴다).
+        self._recently_moved = set(moving_ordered)
+        self.selected.clear()
+        self.anchor_item = None
         self._relayout()
+        self._update_selection_visual()
 
     def _confirm(self):
         total_kept = len(self.items)

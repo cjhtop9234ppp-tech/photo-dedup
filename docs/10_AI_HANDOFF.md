@@ -138,6 +138,28 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
     (v1.2.0에서는 번호 없음/4번으로 어긋나 있었음). 번호를 바꿀 땐 두 `tk.LabelFrame`의
     `text=` 문자열을 함께 맞출 것
 
+26. (v1.3.0부터) `OrderEditor`의 이동 계열 함수(`_reorder_to`, `_move_selected`)는 이동이
+    끝나면 반드시 `self.selected.clear()` 후 `self._recently_moved`에 방금 옮긴 항목을
+    담고 `_update_selection_visual()`을 호출해야 한다 - 사용자가 명시적으로 요청한 동작으로,
+    "이동 후에는 선택이 풀리고 방금 옮긴 사진만 노란 테두리(`MOVED_BORDER`)로 표시"하기 위함.
+    `_border_color()`가 `selected` → `_recently_moved` → 기본값 순으로 확인하는 우선순위도
+    유지할 것. `_recently_moved`는 다음 클릭/드래그가 시작될 때(`_on_press`)와 실행
+    취소(`_on_undo`) 시 지운다
+
+27. (v1.3.0부터) `OrderEditor`의 "보기" 콤보박스(아이콘 크기)가 바뀌면
+    `app_settings.save_settings({"order_editor_thumb_size": 라벨})`로 즉시 저장해야 하고,
+    `__init__`은 그 값을 읽어 `self.THUMB_SIZE`를 **클래스 속성이 아니라 인스턴스 속성으로
+    가려서** 설정해야 한다(클래스 속성을 직접 바꾸면 다른 창에도 영향을 줄 수 있음).
+    `THUMB_SIZE_OPTIONS`의 6개 라벨(작은/보통/큰/매우 큰/매우 가장 중간 큰/가장 큰 아이콘)은
+    사용자가 만든 다른 프로그램(FastImageAnnotator)의 동일한 옵션과 이름을 맞춘 것이므로
+    라벨 문구를 임의로 바꾸지 말 것
+
+28. (v1.3.0부터) 사진 셀에는 `<Double-Button-1>`로 `_on_double_click`이 바인딩되어 있어
+    더블클릭하면 `_show_preview()`가 큰 미리보기 창을 띄운다 - 이 바인딩을 지우면 사진을
+    확대해서 볼 방법이 없어진다. 새 셀 위젯을 추가할 때도(`_make_cell`) 기존 3개
+    바인딩(`ButtonPress-1`/`B1-Motion`/`ButtonRelease-1`)과 함께 이 바인딩도 반드시
+    같이 걸어야 한다
+
 25. (v1.2.2부터) `_open_result_viewer()`는 새 뷰어를 열기 전에 반드시
     `_close_previous_viewer()`로 직전에 띄운 뷰어 프로세스를 먼저 종료해야 한다 -
     사용자가 명시적으로 요청한 동작이다("이전 뷰어를 보고 있는 중에 또 다른 zip이 처리되면
