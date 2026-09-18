@@ -995,6 +995,9 @@ class OrderEditor:
         self.win.bind("<Delete>", self._on_delete_key)
         self.win.bind("<Control-z>", self._on_undo)
         self.win.bind("<Control-Z>", self._on_undo)
+        # 창의 기본(X 버튼) 닫기도 "닫기 (변경 취소)"와 똑같이 처리해야 한다 - 그렇지 않으면
+        # app._order_editor_open이 True로 남아서, 감시 폴더 자동 처리 대기열이 영원히 멈춘다.
+        self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.win.focus_set()
 
     def _size_window(self):

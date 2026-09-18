@@ -2,7 +2,7 @@
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.3.1"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]

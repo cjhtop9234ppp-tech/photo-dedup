@@ -2319,6 +2319,9 @@ class OrderEditor:
         self.win.bind("<Delete>", self._on_delete_key)
         self.win.bind("<Control-z>", self._on_undo)
         self.win.bind("<Control-Z>", self._on_undo)
+        # 창의 기본(X 버튼) 닫기도 "닫기 (변경 취소)"와 똑같이 처리해야 한다 - 그렇지 않으면
+        # app._order_editor_open이 True로 남아서, 감시 폴더 자동 처리 대기열이 영원히 멈춘다.
+        self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.win.focus_set()
 
     def _size_window(self):
@@ -2855,7 +2858,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.3.0.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.3.1.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2870,7 +2873,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.3.1"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]
@@ -3259,6 +3262,27 @@ installer_output\PhotoDedup_Setup_1.1.7.exe
   이 세션에서는 원인을 코드 리뷰로 추론하고 수정한 뒤, 짧은 재현 테스트로는 "고친 뒤에도
   정상 동작하는지"만 확인했다 - 실제로 며칠 이상 켜두고 감시가 계속 반응하는지는 향후
   사용 중 추가로 지켜봐야 한다.
+
+### 9-18. (v1.1.5~v1.3.0에서 발생, v1.3.1에서 수정, 실사용 중 실제 발생) 순서 정리 창을 X 버튼으로 닫으면 그 뒤로 감시가 조용히 멈춤
+- **증상**: 감시가 켜져 있고 겉보기에 정상 작동하다가, 어느 순간부터 새 zip을 넣어도 반응이
+  없어짐. 같은 zip을 `PhotoDedup.exe "경로"`로 직접 열면 정상 처리됨(처리 로직 자체는 멀쩡).
+  실제 사례: 이전 zip을 처리한 뒤 뜬 "사진 순서 정리" 창을 "닫기 (변경 취소)" 버튼이 아니라
+  창 자체의 X 버튼으로 닫았더니, 그 뒤로 새로 받은 다른 zip이 전혀 처리되지 않았음.
+- **원인**: `OrderEditor`가 `self.win.protocol("WM_DELETE_WINDOW", ...)`를 등록해두지
+  않았다. "닫기 (변경 취소)" 버튼은 `_on_cancel()`(창 파괴 + `app._on_order_editor_closed()`
+  호출로 `app._order_editor_open`을 `False`로 되돌림)을 호출하지만, 창의 X 버튼은 이
+  등록이 없으면 tkinter 기본 동작으로 그냥 창만 파괴하고 `_on_cancel()`을 전혀 거치지
+  않는다. 그 결과 `app._order_editor_open`이 `True`로 영원히 남고,
+  `_drain_watch_queue()`의 `if self._order_editor_open: return` 가드에 걸려 그 뒤로는
+  감시 대기열에 새 zip이 쌓여도 절대 처리되지 않았다(에러도 없이 조용히 멈춤).
+- **해결**: `OrderEditor.__init__()`에 `self.win.protocol("WM_DELETE_WINDOW",
+  self._on_cancel)`를 추가해서, X 버튼으로 닫아도 "닫기 (변경 취소)" 버튼과 완전히 동일한
+  경로(창 파괴 + `_order_editor_open` 해제 + 대기 중이던 다음 작업 이어서 처리)를 타도록
+  통일함.
+- **검증**: 실제 `OrderEditor` 인스턴스를 만들고, 등록된 `WM_DELETE_WINDOW` Tcl 핸들러를
+  직접 호출해서(= 사용자가 X 버튼을 누른 것과 동일한 효과) `app._order_editor_open`이
+  정상적으로 `False`로 풀리는지, 그리고 대기 중이던 다음 zip이 자동으로 이어서 처리되는지
+  확인 완료. 실제로 막혀 있던 사용자의 zip도 직접 열어서 먼저 처리해드림.
 
 ### 9-17. (개발 환경 참고사항) 테스트용 zip에 단색 사진 여러 장을 넣으면 서로 중복으로 판정될 수 있음
 - **증상**: 순전히 단색(빨강/초록/파랑/주황/보라/청록 등)으로 채운 정사각형 테스트 이미지를

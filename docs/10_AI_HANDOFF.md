@@ -138,6 +138,14 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
     (v1.2.0에서는 번호 없음/4번으로 어긋나 있었음). 번호를 바꿀 땐 두 `tk.LabelFrame`의
     `text=` 문자열을 함께 맞출 것
 
+29. (v1.3.1부터) `OrderEditor.__init__`은 반드시
+    `self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)`을 등록해야 한다 - 실사용 중
+    실제 발생한 버그: 사용자가 "닫기 (변경 취소)" 버튼이 아니라 창 자체의 X 버튼으로 순서
+    정리 창을 닫으면, 이 등록이 없을 때는 `app._order_editor_open`이 `True`로 영원히 남아서
+    `_drain_watch_queue()`가 그 뒤로 다시는 대기 중인 zip을 처리하지 못하고 감시가 조용히
+    멈춰버렸다(겉보기엔 감시가 정상 작동하는 것처럼 보이다가 어느 순간부터 반응이 없어짐).
+    이 한 줄을 지우면 정확히 이 버그가 재발한다
+
 26. (v1.3.0부터) `OrderEditor`의 이동 계열 함수(`_reorder_to`, `_move_selected`)는 이동이
     끝나면 반드시 `self.selected.clear()` 후 `self._recently_moved`에 방금 옮긴 항목을
     담고 `_update_selection_visual()`을 호출해야 한다 - 사용자가 명시적으로 요청한 동작으로,
