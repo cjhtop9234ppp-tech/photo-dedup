@@ -171,9 +171,13 @@ zip으로 압축된 사진 묶음에서 **내용이 같거나 사실상 같은 �
 25. (v1.2.2부터) `_open_result_viewer()`는 새 뷰어를 열기 전에 반드시
     `_close_previous_viewer()`로 직전에 띄운 뷰어 프로세스를 먼저 종료해야 한다 -
     사용자가 명시적으로 요청한 동작이다("이전 뷰어를 보고 있는 중에 또 다른 zip이 처리되면
-    이전 창은 닫고 새 창만 남았으면 좋겠다"). `taskkill /F /T /PID`로 프로세스 트리 전체를
-    끄는 이유: FastImageAnnotator 같은 Electron 프로그램은 대표 프로세스 하나만 끄면
-    GPU/렌더러 자식 프로세스가 고아로 남을 수 있다. 이 종료 로직은 `self._viewer_process`에
+    이전 창은 닫고 새 창만 남았으면 좋겠다"). **(v1.3.2부터) 강제 종료가 아니라 정상 종료가
+    먼저다**: 프로세스 트리의 보이는 창에 `WM_CLOSE`를 보내 최대 6초 기다리고, 그래도 안
+    끝날 때만 `taskkill /F /T`로 폴백한다. 처음부터 `/F`로 죽이면 FastImageAnnotator가 창
+    위치/보기 크기/도구 색상·굵기를 저장할 기회를 잃어 설정이 초기화되고 다음 실행도 느려진다
+    (v1.2.2~v1.3.1의 실제 버그). 닫기+열기는 `_open_result_viewer_worker`에서 백그라운드
+    스레드 + `_viewer_lock`으로 직렬화해 Tk 화면이 멈추지 않게 한다. 트리 전체를 다루는
+    이유: FastImageAnnotator 같은 Electron 프로그램은 GPU/렌더러 자식 프로세스가 여러 개다. 이 종료 로직은 `self._viewer_process`에
     기록된, PhotoDedup이 직접 띄운 프로세스에만 적용되며 탐색기(`_open_in_explorer`,
     `os.startfile` 사용)에는 적용되지 않는다 - 탐색기는 여러 창이 공유하는 프로세스라서
     잘못 건드리면 사용자의 다른 탐색기 창까지 전부 닫힐 위험이 있다

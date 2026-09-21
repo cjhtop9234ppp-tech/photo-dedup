@@ -95,6 +95,7 @@ class DedupApp:
         self.worker_thread: threading.Thread | None = None
         self.thumb_cache: list = []  # PhotoImage 참조 유지용
         self._auto_open_order_editor = False  # 자동 실행 모드에서 처리 끝나면 순서 정리 창까지 자동으로 열지 여부
+        self._viewer_lock = threading.Lock()
         self._viewer_process: subprocess.Popen | None = None  # _open_result_viewer()가 마지막으로 띄운 뷰어 프로세스
 
         # "파일자동읽기 폴더지정" (감시 폴더 자동 처리) 관련 상태
@@ -730,36 +731,105 @@ class DedupApp:
         """
         if not os.path.isdir(path):
             return
-        self._close_previous_viewer()
-        viewer_path = app_settings.load_settings().get("viewer_path", "")
-        viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
-        if viewer_path and os.path.isfile(viewer_path):
-            try:
-                self._viewer_process = subprocess.Popen([viewer_path, path])
-                return
-            except Exception:
-                pass
-        faststone = find_faststone_exe()
-        if faststone:
-            try:
-                self._viewer_process = subprocess.Popen([faststone, path])
-                return
-            except Exception:
-                pass
+        # 이전 뷰어를 정상 종료할 때까지 기다리는 동안 화면이 멈추지 않도록 백그라운드에서 처리한다.
+        # 연속 호출은 락으로 직렬화해서 "닫기 -> 새로 열기" 순서가 뒤섞이지 않게 한다.
+        threading.Thread(target=self._open_result_viewer_worker, args=(path,), daemon=True).start()
+
+    def _open_result_viewer_worker(self, path: str):
+        with self._viewer_lock:
+            self._close_previous_viewer()
+            viewer_path = app_settings.load_settings().get("viewer_path", "")
+            viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
+            if viewer_path and os.path.isfile(viewer_path):
+                try:
+                    self._viewer_process = subprocess.Popen([viewer_path, path])
+                    return
+                except Exception:
+                    pass
+            faststone = find_faststone_exe()
+            if faststone:
+                try:
+                    self._viewer_process = subprocess.Popen([faststone, path])
+                    return
+                except Exception:
+                    pass
         self._open_in_explorer(path)
+
+    @staticmethod
+    def _process_tree_pids(root_pid: int) -> set:
+        """root_pid와 그 모든 자손 프로세스의 PID 집합 (Toolhelp 스냅샷 사용)."""
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        k32 = ctypes.windll.kernel32
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+        children: dict = {}
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        if k32.Process32FirstW(snap, ctypes.byref(entry)):
+            while True:
+                children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+                if not k32.Process32NextW(snap, ctypes.byref(entry)):
+                    break
+        k32.CloseHandle(snap)
+        result, stack = {root_pid}, [root_pid]
+        while stack:
+            for c in children.get(stack.pop(), []):
+                if c not in result:
+                    result.add(c)
+                    stack.append(c)
+        return result
 
     def _close_previous_viewer(self):
         """지난번에 _open_result_viewer()로 띄운 뷰어 프로세스가 아직 살아있으면 닫는다.
 
-        taskkill /T(프로세스 트리 전체)를 쓰는 이유: FastImageAnnotator 같은 Electron
-        프로그램은 메인 창 하나를 띄워도 내부적으로 GPU/렌더러 등 자식 프로세스를 여러 개
-        만드는데, 대표 프로세스(Popen이 반환한 PID)만 끄면 이 자식들이 고아 프로세스로
-        남을 수 있다. 이미 저절로 종료된 경우(poll()이 None이 아님)는 아무것도 하지 않는다.
+        강제 종료(taskkill /F)를 먼저 쓰면 안 된다: Electron 프로그램(FastImageAnnotator)은
+        창을 정상적으로 닫을 때 창 위치/보기 크기/도구 색상·굵기 같은 설정을 디스크에 저장하는데,
+        강제 종료하면 이 저장이 통째로 생략돼 다음 실행 때 설정이 초기화되고 시작도 느려진다.
+        그래서 (1) 프로세스 트리의 보이는 창에 WM_CLOSE를 보내 정상 종료를 유도하고, (2) 최대
+        약 6초 기다린 뒤, (3) 그래도 안 끝날 때만 taskkill /F /T로 트리 전체를 정리한다.
+        이미 저절로 종료된 경우(poll()이 None이 아님)는 아무것도 하지 않는다.
         """
         proc = self._viewer_process
         self._viewer_process = None
         if proc is None or proc.poll() is not None:
             return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            pids = self._process_tree_pids(proc.pid)
+            handles = []
+            enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            def _collect(hwnd, _lparam):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in pids and user32.IsWindowVisible(hwnd):
+                    handles.append(hwnd)
+                return True
+
+            user32.EnumWindows(enum_proc(_collect), 0)
+            for hwnd in handles:
+                user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            if handles:
+                try:
+                    proc.wait(timeout=6)
+                    return
+                except subprocess.TimeoutExpired:
+                    pass
+        except Exception:
+            pass
         try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
