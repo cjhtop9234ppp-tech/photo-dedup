@@ -32,8 +32,9 @@ from . import startup as app_startup
 from . import tray as app_tray
 from . import viewers as app_viewers
 from . import watcher as app_watcher
+from . import __version__
 
-APP_TITLE = "중복 사진 정리 도구"
+APP_TITLE = f"중복 사진 정리 도구 v{__version__}"
 THUMB_SIZE = (110, 110)
 
 # FastStone Image Viewer를 찾을 때 시도해보는 흔한 설치 경로 (없으면 레지스트리 App Paths도 확인한다)
@@ -737,9 +738,18 @@ class DedupApp:
 
     def _open_result_viewer_worker(self, path: str):
         with self._viewer_lock:
-            self._close_previous_viewer()
             viewer_path = app_settings.load_settings().get("viewer_path", "")
             viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
+            is_fast_image_annotator = (
+                viewer_path and os.path.basename(viewer_path).lower() == "fastimageannotator.exe"
+            )
+            # FastImageAnnotator는 이제 싱글 인스턴스라, 이미 떠 있으면 새로 띄운 프로세스가
+            # 그 창에 폴더만 전달하고 바로 종료한다 (창을 새로 안 띄우고 기존 창이 그
+            # 폴더로 바로 전환됨). 그래서 이 경우엔 "이전 창 닫기 -> 대기 -> 새로 띄우기"
+            # 왕복을 건너뛴다 - 안 그러면 이미 필요 없어진 대기 시간만큼 팝업이 늦어진다.
+            # FastStone이나 사용자가 고른 다른 프로그램은 이 능력이 없으므로 그대로 먼저 닫는다.
+            if not is_fast_image_annotator:
+                self._close_previous_viewer()
             if viewer_path and os.path.isfile(viewer_path):
                 try:
                     self._viewer_process = subprocess.Popen([viewer_path, path])
