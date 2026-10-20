@@ -1075,8 +1075,8 @@ class OrderEditor:
         self.win.bind("<Delete>", self._on_delete_key)
         self.win.bind("<Control-z>", self._on_undo)
         self.win.bind("<Control-Z>", self._on_undo)
-        # F2: "최종 결과폴더로 보내기(F2)" 버튼과 완전히 같은 동작(확인 팝업도 동일하게 뜬다).
-        self.win.bind("<F2>", lambda e: self._confirm())
+        # F2: "최종 결과폴더로 보내기(F2)" - 확인 팝업 없이 바로 확정한다(버튼 클릭은 팝업을 거친다).
+        self.win.bind("<F2>", lambda e: self._confirm(skip_confirm=True))
         # 창의 기본(X 버튼) 닫기도 "닫기 (변경 취소)"와 똑같이 처리해야 한다 - 그렇지 않으면
         # app._order_editor_open이 True로 남아서, 감시 폴더 자동 처리 대기열이 영원히 멈춘다.
         self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -1280,7 +1280,7 @@ class OrderEditor:
 
         win.bind("<Escape>", close)
         # 미리보기 창에 포커스가 있어도 F2로 바로 확정할 수 있게 한다.
-        win.bind("<F2>", lambda e: (close(), self._confirm()))
+        win.bind("<F2>", lambda e: (close(), self._confirm(skip_confirm=True)))
         win.bind("<Double-Button-1>", close)
         label.bind("<Double-Button-1>", close)
         win.protocol("WM_DELETE_WINDOW", close)
@@ -1499,7 +1499,9 @@ class OrderEditor:
         self._relayout()
         self._update_selection_visual()
 
-    def _confirm(self):
+    def _confirm(self, skip_confirm: bool = False):
+        """skip_confirm=True(F2 키)면 "계속할까요?" 확인 팝업 없이 바로 확정한다.
+        버튼 클릭은 기존처럼 확인 팝업을 거친다."""
         total_kept = len(self.items)
         total_deleted = len(self.deleted_items)
         zip_paths = [p for p in self.source_zip_paths if os.path.isfile(p)]
@@ -1511,7 +1513,7 @@ class OrderEditor:
             names = ", ".join(Path(p).name for p in zip_paths)
             msg += f"\n원본 zip 파일({names})은 휴지통으로 보내집니다."
         msg += "\n계속할까요?"
-        if not messagebox.askyesno(APP_TITLE, msg):
+        if not skip_confirm and not messagebox.askyesno(APP_TITLE, msg):
             return
 
         width = max(3, len(str(total_kept))) if total_kept else 3
