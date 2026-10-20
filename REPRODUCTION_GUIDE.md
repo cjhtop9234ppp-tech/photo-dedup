@@ -315,8 +315,10 @@ if __name__ == "__main__":
 
 ### `app/__init__.py`
 ```python
+# 버전은 여기 한 곳에서만 가져온다 (Kim's programe 공통 규칙: 창 제목의 버전과 설치파일
+# 버전(installer.iss의 MyAppVersion)이 항상 같은 값이어야 함).
+__version__ = "1.3.5"
 ```
-(빈 파일입니다 - `app` 폴더를 파이썬 패키지로 인식시키는 용도 외 내용 없음)
 
 ### `app/core.py`
 ```python
@@ -1356,8 +1358,9 @@ from . import startup as app_startup
 from . import tray as app_tray
 from . import viewers as app_viewers
 from . import watcher as app_watcher
+from . import __version__
 
-APP_TITLE = "중복 사진 정리 도구"
+APP_TITLE = f"중복 사진 정리 도구 v{__version__}"
 THUMB_SIZE = (110, 110)
 
 # FastStone Image Viewer를 찾을 때 시도해보는 흔한 설치 경로 (없으면 레지스트리 App Paths도 확인한다)
@@ -2061,9 +2064,18 @@ class DedupApp:
 
     def _open_result_viewer_worker(self, path: str):
         with self._viewer_lock:
-            self._close_previous_viewer()
             viewer_path = app_settings.load_settings().get("viewer_path", "")
             viewer_path = os.path.normpath(viewer_path) if viewer_path else ""
+            is_fast_image_annotator = (
+                viewer_path and os.path.basename(viewer_path).lower() == "fastimageannotator.exe"
+            )
+            # FastImageAnnotator는 이제 싱글 인스턴스라, 이미 떠 있으면 새로 띄운 프로세스가
+            # 그 창에 폴더만 전달하고 바로 종료한다 (창을 새로 안 띄우고 기존 창이 그
+            # 폴더로 바로 전환됨). 그래서 이 경우엔 "이전 창 닫기 -> 대기 -> 새로 띄우기"
+            # 왕복을 건너뛴다 - 안 그러면 이미 필요 없어진 대기 시간만큼 팝업이 늦어진다.
+            # FastStone이나 사용자가 고른 다른 프로그램은 이 능력이 없으므로 그대로 먼저 닫는다.
+            if not is_fast_image_annotator:
+                self._close_previous_viewer()
             if viewer_path and os.path.isfile(viewer_path):
                 try:
                     self._viewer_process = subprocess.Popen([viewer_path, path])
@@ -2378,7 +2390,7 @@ class OrderEditor:
         self.THUMB_SIZE = (px, px)  # 클래스 기본값을 인스턴스 값으로 가림(다른 창에 영향 없음)
 
         self.win = tk.Toplevel(app.root)
-        self.win.title("사진 순서 정리")
+        self.win.title(f"사진 순서 정리 v{__version__}")
         self._size_window()
         self._build_ui()
         self.win.update_idletasks()
@@ -2389,6 +2401,8 @@ class OrderEditor:
         self.win.bind("<Delete>", self._on_delete_key)
         self.win.bind("<Control-z>", self._on_undo)
         self.win.bind("<Control-Z>", self._on_undo)
+        # F2: "최종 결과폴더로 보내기(F2)" 버튼과 완전히 같은 동작(확인 팝업도 동일하게 뜬다).
+        self.win.bind("<F2>", lambda e: self._confirm())
         # 창의 기본(X 버튼) 닫기도 "닫기 (변경 취소)"와 똑같이 처리해야 한다 - 그렇지 않으면
         # app._order_editor_open이 True로 남아서, 감시 폴더 자동 처리 대기열이 영원히 멈춘다.
         self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -2416,7 +2430,7 @@ class OrderEditor:
             top,
             text="사진을 클릭해 선택(Shift+클릭으로 범위 선택)한 뒤 '선택 위로/아래로' 버튼이나 "
                  "마우스 드래그로 순서를 바꾸세요. 더블클릭하면 크게 볼 수 있습니다.\n"
-                 "Delete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소",
+                 "Delete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소  |  F2: 최종 결과폴더로 보내기",
             fg="#555555", justify="left",
         ).pack(side="left")
 
@@ -2427,7 +2441,7 @@ class OrderEditor:
         tk.Button(btn_frame, text="선택 해제", command=self._clear_selection).pack(side="left", padx=3)
         tk.Button(btn_frame, text="닫기 (변경 취소)", command=self._on_cancel).pack(side="left", padx=3)
         tk.Button(
-            btn_frame, text="최종 결과폴더로 보내기", command=self._confirm,
+            btn_frame, text="최종 결과폴더로 보내기(F2)", command=self._confirm,
             bg="#2f7dd1", fg="white", font=("", 10, "bold"),
         ).pack(side="left", padx=(12, 0))
 
@@ -2591,6 +2605,8 @@ class OrderEditor:
             win.destroy()
 
         win.bind("<Escape>", close)
+        # 미리보기 창에 포커스가 있어도 F2로 바로 확정할 수 있게 한다.
+        win.bind("<F2>", lambda e: (close(), self._confirm()))
         win.bind("<Double-Button-1>", close)
         label.bind("<Double-Button-1>", close)
         win.protocol("WM_DELETE_WINDOW", close)
@@ -2928,7 +2944,7 @@ REM 설치: winget install JRSoftware.InnoSetup  (https://jrsoftware.org/isinfo.
 set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (
     %ISCC% installer.iss
-    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.3.2.exe
+    echo 설치 프로그램 빌드 완료: installer_output\PhotoDedup_Setup_1.3.5.exe
 ) else (
     echo [안내] Inno Setup(ISCC.exe)을 찾지 못해 설치 프로그램은 건너뛰었습니다.
     echo         "winget install JRSoftware.InnoSetup" 설치 후 다시 실행하면 설치 프로그램까지 만들어집니다.
@@ -2943,7 +2959,7 @@ pause
 ; 빌드: "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "중복 사진 정리 도구 (PhotoDedup)"
-#define MyAppVersion "1.3.2"
+#define MyAppVersion "1.3.5"
 #define MyAppExeName "PhotoDedup.exe"
 
 [Setup]

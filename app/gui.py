@@ -1064,7 +1064,7 @@ class OrderEditor:
         self.THUMB_SIZE = (px, px)  # 클래스 기본값을 인스턴스 값으로 가림(다른 창에 영향 없음)
 
         self.win = tk.Toplevel(app.root)
-        self.win.title("사진 순서 정리")
+        self.win.title(f"사진 순서 정리 v{__version__}")
         self._size_window()
         self._build_ui()
         self.win.update_idletasks()
@@ -1075,6 +1075,8 @@ class OrderEditor:
         self.win.bind("<Delete>", self._on_delete_key)
         self.win.bind("<Control-z>", self._on_undo)
         self.win.bind("<Control-Z>", self._on_undo)
+        # F2: "최종 결과폴더로 보내기(F2)" 버튼과 완전히 같은 동작(확인 팝업도 동일하게 뜬다).
+        self.win.bind("<F2>", lambda e: self._confirm())
         # 창의 기본(X 버튼) 닫기도 "닫기 (변경 취소)"와 똑같이 처리해야 한다 - 그렇지 않으면
         # app._order_editor_open이 True로 남아서, 감시 폴더 자동 처리 대기열이 영원히 멈춘다.
         self.win.protocol("WM_DELETE_WINDOW", self._on_cancel)
@@ -1102,7 +1104,7 @@ class OrderEditor:
             top,
             text="사진을 클릭해 선택(Shift+클릭으로 범위 선택)한 뒤 '선택 위로/아래로' 버튼이나 "
                  "마우스 드래그로 순서를 바꾸세요. 더블클릭하면 크게 볼 수 있습니다.\n"
-                 "Delete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소",
+                 "Delete 키: 선택한 사진 제외 표시  |  Ctrl+Z: 실행 취소  |  F2: 최종 결과폴더로 보내기",
             fg="#555555", justify="left",
         ).pack(side="left")
 
@@ -1113,7 +1115,7 @@ class OrderEditor:
         tk.Button(btn_frame, text="선택 해제", command=self._clear_selection).pack(side="left", padx=3)
         tk.Button(btn_frame, text="닫기 (변경 취소)", command=self._on_cancel).pack(side="left", padx=3)
         tk.Button(
-            btn_frame, text="최종 결과폴더로 보내기", command=self._confirm,
+            btn_frame, text="최종 결과폴더로 보내기(F2)", command=self._confirm,
             bg="#2f7dd1", fg="white", font=("", 10, "bold"),
         ).pack(side="left", padx=(12, 0))
 
@@ -1277,6 +1279,8 @@ class OrderEditor:
             win.destroy()
 
         win.bind("<Escape>", close)
+        # 미리보기 창에 포커스가 있어도 F2로 바로 확정할 수 있게 한다.
+        win.bind("<F2>", lambda e: (close(), self._confirm()))
         win.bind("<Double-Button-1>", close)
         label.bind("<Double-Button-1>", close)
         win.protocol("WM_DELETE_WINDOW", close)
